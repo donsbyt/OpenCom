@@ -40,7 +40,7 @@ scripts\dev\setup.bat all
 What this does:
 - installs backend npm dependencies
 - installs frontend npm dependencies
-- starts backend infra via `docker compose up -d mariadb-core mariadb-node redis minio` if docker is installed
+- starts backend infra via `docker compose up -d mariadb-core mariadb-node redis` if docker is installed
 
 ### Fully inclusive backend DB setup (env + database + tables)
 For local MariaDB installed on the host (uses `sudo mysql` for provisioning):
@@ -61,6 +61,16 @@ docker compose up -d --build
 ```
 
 If a host port is already taken, override mapping defaults (for example `REDIS_PORT=6380`, `CORE_DB_PORT=3309`, `NODE_DB_PORT=3310`, `FRONTEND_PORT=5174`) when running compose.
+
+MinIO is not part of the active app path right now. If you want it for manual object-storage experiments, start it explicitly:
+
+```bash
+docker compose --profile optional-storage up -d minio
+```
+
+Default MinIO loopback bindings:
+- API: `127.0.0.1:9100`
+- Console: `127.0.0.1:9101`
 
 ## 3) Run services
 ### Linux/macOS

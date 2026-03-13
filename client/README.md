@@ -108,6 +108,7 @@ Direct script entrypoints are also available:
 ```bash
 ./scripts/build-linux.sh
 ./scripts/build-aur.sh
+./scripts/stage-aur.sh
 ./scripts/build-win.sh
 ./scripts/build-all.sh
 ```
@@ -128,6 +129,42 @@ Generate an Arch/AUR skeleton for the prebuilt tarball:
 cd client
 npm run build:aur
 ```
+
+Generate or restage the AUR directory from the current Linux artifacts:
+
+```bash
+cd client
+npm run stage:aur
+```
+
+By default, the staged `PKGBUILD` points at `https://opencom.online/downloads/OpenCom.tar.gz` and the script hashes that remote tarball directly to populate `sha256sums`.
+
+You can override the tarball source and related package metadata without editing `client/packaging/linux.json`:
+
+```bash
+cd client
+npm run stage:aur -- \
+  --source-url https://downloads.example.com/OpenCom-nightly.tar.gz \
+  --tarball-name OpenCom-nightly.tar.gz \
+  --tarball-sha256 <sha256>
+```
+
+If you only want to swap the host/base path, use `--release-base-url` instead:
+
+```bash
+cd client
+npm run stage:aur -- --release-base-url https://downloads.example.com/opencom
+```
+
+Environment variables are supported too:
+
+```bash
+OPENCOM_AUR_SOURCE_URL=https://downloads.example.com/OpenCom.tar.gz \
+OPENCOM_AUR_TARBALL_SHA256=<sha256> \
+npm run stage:aur
+```
+
+When you are intentionally publishing a URL without a local hash match, pass `--skip-tarball-sha256` to emit `SKIP` in `PKGBUILD` and `.SRCINFO`.
 
 That produces:
 

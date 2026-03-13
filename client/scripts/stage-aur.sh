@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-npm run build:aur -- "$@"
+npm run stage:aur -- "$@"

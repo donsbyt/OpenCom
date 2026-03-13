@@ -27,7 +27,12 @@ call npm install || exit /b 1
 where docker >nul 2>nul
 if %ERRORLEVEL%==0 (
   echo [setup] Starting backend infrastructure with docker compose
-  docker compose -f "%~dp0..\..\docker-compose.yml" up -d mariadb-core mariadb-node redis minio || exit /b 1
+  if /I "%OPENCOM_WITH_MINIO%"=="1" (
+    echo [setup] OPENCOM_WITH_MINIO=1, enabling optional MinIO profile
+    docker compose -f "%~dp0..\..\docker-compose.yml" --profile optional-storage up -d mariadb-core mariadb-node redis minio || exit /b 1
+  ) else (
+    docker compose -f "%~dp0..\..\docker-compose.yml" up -d mariadb-core mariadb-node redis || exit /b 1
+  )
 ) else (
   echo [warn] Docker not found, skipping infrastructure startup
 )

@@ -8,6 +8,7 @@ const __dirname = path.dirname(__filename);
 const clientDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(clientDir, "..");
 const frontendDir = path.resolve(repoRoot, "frontend");
+const frontendDownloadsDir = path.resolve(frontendDir, "public", "downloads");
 const distDir = path.resolve(clientDir, "dist");
 
 const TARGETS = {
@@ -39,10 +40,21 @@ function run(cmd, args, cwd) {
 async function copyArtifacts(artifacts) {
   for (const artifact of artifacts) {
     const source = path.join(distDir, artifact.from);
-    const destination = path.join(frontendDir, artifact.to);
     try {
-      await fs.copyFile(source, destination);
-      console.log(`Staged ${artifact.from} -> frontend/${artifact.to}`);
+      await fs.mkdir(frontendDownloadsDir, { recursive: true });
+
+      const destinations = [
+        path.join(frontendDir, artifact.to),
+        path.join(frontendDownloadsDir, artifact.to),
+      ];
+
+      for (const destination of destinations) {
+        await fs.copyFile(source, destination);
+      }
+
+      console.log(
+        `Staged ${artifact.from} -> frontend/${artifact.to} and frontend/public/downloads/${artifact.to}`,
+      );
     } catch (error) {
       if (artifact.optional && error?.code === "ENOENT") {
         console.warn(`Skipping optional artifact ${artifact.from} (not produced on this system).`);

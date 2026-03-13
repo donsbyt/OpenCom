@@ -20,7 +20,7 @@ services:
       MARIADB_USER: ods
       MARIADB_PASSWORD: ods
     ports:
-      - "${CORE_DB_PORT:-3307}:3306"
+      - "${DOCKER_LOCAL_BIND_IP:-127.0.0.1}:${CORE_DB_PORT:-3307}:3306"
     volumes:
       - mariadb_core:/var/lib/mysql
     healthcheck:
@@ -39,7 +39,7 @@ services:
       MARIADB_USER: ods
       MARIADB_PASSWORD: ods
     ports:
-      - "${NODE_DB_PORT:-3308}:3306"
+      - "${DOCKER_LOCAL_BIND_IP:-127.0.0.1}:${NODE_DB_PORT:-3308}:3306"
     volumes:
       - mariadb_node:/var/lib/mysql
     healthcheck:
@@ -53,7 +53,7 @@ services:
     image: redis:7
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${DOCKER_LOCAL_BIND_IP:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -61,6 +61,7 @@ services:
       retries: 20
 
   minio:
+    profiles: ["optional-storage"]
     image: minio/minio:latest
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -68,8 +69,8 @@ services:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: minio123456
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${DOCKER_LOCAL_BIND_IP:-127.0.0.1}:${MINIO_API_PORT:-9100}:9000"
+      - "${DOCKER_LOCAL_BIND_IP:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9101}:9001"
     volumes:
       - minio_data:/data
 

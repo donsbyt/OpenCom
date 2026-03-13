@@ -17,12 +17,14 @@ Requires Node.js >=22 for backend tooling.
 Options:
   --init-env                Generate backend/.env + frontend/.env before setup.
   --with-docker             Start backend docker compose infrastructure first.
+  --with-minio              Also start optional MinIO object storage when using --with-docker.
   --provision-local-db      Create databases/users from .env DB URLs using sudo mysql.
   --mariadb-root-user=USER  MariaDB admin user for provisioning (default: root).
   -h, --help                Show this help message.
 
 Examples:
   ./scripts/dev/setup-database.sh --init-env --with-docker
+  ./scripts/dev/setup-database.sh --init-env --with-docker --with-minio
   ./scripts/dev/setup-database.sh --init-env --provision-local-db
 USAGE
 }
@@ -147,6 +149,7 @@ NODE
 
 start_docker_if_requested() {
   local with_docker="$1"
+  local with_minio="$2"
 
   if [[ "$with_docker" != "true" ]]; then
     return
@@ -159,8 +162,14 @@ start_docker_if_requested() {
 
   echo "[db-setup] Starting backend infrastructure with ${COMPOSE_CMD}"
   pushd "$ROOT_DIR" >/dev/null
-  # shellcheck disable=SC2086
-  ${COMPOSE_CMD} up -d mariadb-core mariadb-node redis minio
+  if [[ "$with_minio" == "true" ]]; then
+    echo "[db-setup] --with-minio enabled, starting optional MinIO profile"
+    # shellcheck disable=SC2086
+    ${COMPOSE_CMD} --profile optional-storage up -d mariadb-core mariadb-node redis minio
+  else
+    # shellcheck disable=SC2086
+    ${COMPOSE_CMD} up -d mariadb-core mariadb-node redis
+  fi
   popd >/dev/null
 }
 
@@ -282,6 +291,7 @@ run_migrations() {
 
 main() {
   local with_docker="false"
+  local with_minio="false"
   local init_env="false"
   local provision_local_db="false"
   local mariadb_root_user="root"
@@ -290,6 +300,10 @@ main() {
     case "$1" in
       --with-docker)
         with_docker="true"
+        shift
+        ;;
+      --with-minio)
+        with_minio="true"
         shift
         ;;
       --init-env)
@@ -327,7 +341,7 @@ main() {
   init_env_if_requested "$init_env"
   load_backend_env
   normalize_db_urls_for_local_mariadb_if_needed "$with_docker" "$provision_local_db"
-  start_docker_if_requested "$with_docker"
+  start_docker_if_requested "$with_docker" "$with_minio"
   provision_local_db_if_requested "$provision_local_db" "$mariadb_root_user"
   ensure_backend_deps
   run_migrations

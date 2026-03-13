@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, session, desktopCapturer } from "electron";
+import { app, BrowserWindow, dialog, shell, ipcMain, session, desktopCapturer } from "electron";
 import { createServer } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -11,6 +11,10 @@ const __dirname = path.dirname(__filename);
 
 const REMOTE_FALLBACK_URL = process.env.OPENCOM_APP_URL || "https://opencom.online";
 const CORE_API_URL = process.env.OPENCOM_CORE_API_URL || "https://api.opencom.online";
+const UPDATE_CHECK_URL =
+  process.env.OPENCOM_UPDATE_CHECK_URL || "/downloads/desktop/latest";
+const AUTO_UPDATE_CHECK_ENABLED =
+  String(process.env.OPENCOM_DISABLE_AUTO_UPDATE_CHECK || "").trim() !== "1";
 const LOCAL_INDEX = path.join(__dirname, "web", "index.html");
 const LOCAL_ICON = path.join(__dirname, "web", "logo.png");
 const RPC_HOST = process.env.OPENCOM_RPC_HOST || "127.0.0.1";
@@ -21,6 +25,24 @@ const rpcAuthState = {
   accessToken: "",
   coreApi: ""
 };
+
+const desktopUpdateState = {
+  currentVersion: app.getVersion(),
+  latestVersion: "",
+  productName: "OpenCom",
+  platform: process.platform,
+  arch: process.arch,
+  checking: false,
+  checkedAt: "",
+  updateAvailable: false,
+  artifact: null,
+  downloadedPath: "",
+  lastAction: "idle",
+  error: "",
+  sourceUrl: ""
+};
+
+let autoUpdateCheckScheduled = false;
 
 const SESSION_FILE_NAME = "data.json";
 
@@ -78,6 +100,308 @@ function writeDesktopSession(session) {
     log.error("Failed writing desktop session", error);
     return false;
   }
+}
+
+function getDesktopUpdateState() {
+  return {
+    ...desktopUpdateState,
+    artifact: desktopUpdateState.artifact
+      ? { ...desktopUpdateState.artifact }
+      : null,
+  };
+}
+
+function setDesktopUpdateState(patch = {}) {
+  Object.assign(desktopUpdateState, patch || {});
+}
+
+function compareVersionStrings(a = "", b = "") {
+  const left = String(a || "")
+    .split(/[^0-9]+/)
+    .filter(Boolean)
+    .map((part) => Number(part));
+  const right = String(b || "")
+    .split(/[^0-9]+/)
+    .filter(Boolean)
+    .map((part) => Number(part));
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (left[index] || 0) - (right[index] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function resolveUrlAgainstBase(baseUrl, target) {
+  const rawBase = String(baseUrl || "").trim();
+  const rawTarget = String(target || "").trim();
+  if (!rawTarget) return "";
+  try {
+    return new URL(rawTarget, rawBase || undefined).toString();
+  } catch {
+    return rawTarget;
+  }
+}
+
+function resolveUpdateCheckUrl() {
+  const explicit = String(UPDATE_CHECK_URL || "").trim();
+  if (!explicit) return resolveUrlAgainstBase(CORE_API_URL, "/downloads/desktop/latest");
+  if (/^https?:\/\//i.test(explicit)) return explicit;
+  return resolveUrlAgainstBase(CORE_API_URL, explicit);
+}
+
+function isInstallableArtifact(fileName = "") {
+  return /\.(exe|deb)$/i.test(String(fileName || "").trim());
+}
+
+function appendVersionToFileName(fileName = "", version = "") {
+  const parsed = path.parse(String(fileName || "").trim() || "OpenCom-update");
+  const normalizedVersion = String(version || "").trim().replace(/[^a-zA-Z0-9._-]+/g, "-");
+  if (!normalizedVersion) return parsed.base || "OpenCom-update";
+  return `${parsed.name}-${normalizedVersion}${parsed.ext || ""}`;
+}
+
+async function downloadUpdateArtifact(url, destinationPath, expectedSha256 = "") {
+  const response = await fetch(url, { redirect: "follow" });
+  if (!response.ok) {
+    throw new Error(`UPDATE_DOWNLOAD_${response.status}`);
+  }
+
+  const payload = Buffer.from(await response.arrayBuffer());
+  if (expectedSha256) {
+    const digest = crypto.createHash("sha256").update(payload).digest("hex");
+    if (digest.toLowerCase() !== String(expectedSha256).trim().toLowerCase()) {
+      throw new Error("UPDATE_CHECKSUM_MISMATCH");
+    }
+  }
+
+  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+  fs.writeFileSync(destinationPath, payload);
+  return destinationPath;
+}
+
+function hasMatchingDownloadedUpdate(destinationPath, artifact = null) {
+  if (!destinationPath || !artifact?.size) return false;
+  try {
+    const stat = fs.statSync(destinationPath);
+    return stat.isFile() && stat.size === artifact.size;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchDesktopReleaseInfo() {
+  const endpoint = new URL(resolveUpdateCheckUrl());
+  endpoint.searchParams.set("platform", process.platform);
+  endpoint.searchParams.set("arch", process.arch);
+  endpoint.searchParams.set("currentVersion", app.getVersion());
+
+  const response = await fetch(endpoint.toString(), {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(`UPDATE_CHECK_${response.status}`);
+
+  const payload = await response.json().catch(() => ({}));
+  const artifact =
+    payload?.artifact && typeof payload.artifact === "object"
+      ? {
+          ...payload.artifact,
+          downloadUrl: resolveUrlAgainstBase(
+            endpoint.toString(),
+            payload.artifact.downloadUrl || payload.artifact.downloadPath || "",
+          ),
+        }
+      : null;
+
+  return {
+    sourceUrl: endpoint.toString(),
+    productName:
+      typeof payload?.productName === "string" && payload.productName.trim()
+        ? payload.productName.trim()
+        : "OpenCom",
+    latestVersion:
+      typeof payload?.latestVersion === "string" ? payload.latestVersion.trim() : "",
+    updateAvailable: Boolean(payload?.updateAvailable),
+    checkedAt:
+      typeof payload?.checkedAt === "string" && payload.checkedAt.trim()
+        ? payload.checkedAt.trim()
+        : new Date().toISOString(),
+    artifact,
+  };
+}
+
+async function installAvailableDesktopUpdate() {
+  const state = getDesktopUpdateState();
+  const artifact = state.artifact;
+  if (!artifact?.downloadUrl) {
+    return { ok: false, error: "NO_UPDATE_ARTIFACT" };
+  }
+
+  if (!isInstallableArtifact(artifact.fileName)) {
+    await shell.openExternal(artifact.downloadUrl);
+    setDesktopUpdateState({
+      lastAction: "opened-download-url",
+      error: "",
+    });
+    return { ok: true, mode: "external", url: artifact.downloadUrl };
+  }
+
+  const updateDir = path.join(app.getPath("downloads"), "OpenCom Updates");
+  const destinationPath = path.join(
+    updateDir,
+    appendVersionToFileName(artifact.fileName, state.latestVersion || state.currentVersion),
+  );
+
+  try {
+    setDesktopUpdateState({
+      lastAction: "downloading",
+      error: "",
+    });
+
+    if (!hasMatchingDownloadedUpdate(destinationPath, artifact)) {
+      await downloadUpdateArtifact(
+        artifact.downloadUrl,
+        destinationPath,
+        artifact.sha256 || "",
+      );
+    }
+
+    setDesktopUpdateState({
+      downloadedPath: destinationPath,
+      lastAction: "downloaded",
+      error: "",
+    });
+
+    const confirm = await dialog.showMessageBox({
+      type: "info",
+      buttons: ["Install now", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+      title: state.productName || "OpenCom",
+      message: `${state.productName || "OpenCom"} ${state.latestVersion || ""} is ready to install`,
+      detail:
+        "Open the downloaded installer/package now. OpenCom may need to close before the update finishes.",
+      noLink: true,
+    });
+
+    if (confirm.response !== 0) {
+      setDesktopUpdateState({ lastAction: "awaiting-install" });
+      return { ok: true, mode: "downloaded", path: destinationPath };
+    }
+
+    const openError = await shell.openPath(destinationPath);
+    if (openError) throw new Error(openError);
+
+    setDesktopUpdateState({
+      lastAction: "installer-opened",
+      error: "",
+    });
+
+    if (/\.exe$/i.test(destinationPath)) {
+      setTimeout(() => app.quit(), 400);
+    }
+
+    return { ok: true, mode: "installer-opened", path: destinationPath };
+  } catch (error) {
+    const message = error?.message || String(error);
+    setDesktopUpdateState({
+      lastAction: "failed",
+      error: message,
+    });
+    log.error("Desktop update install failed", error);
+    throw error;
+  }
+}
+
+async function promptForAvailableDesktopUpdate() {
+  const state = getDesktopUpdateState();
+  if (!state.updateAvailable || !state.artifact) return state;
+
+  const installable = isInstallableArtifact(state.artifact.fileName);
+  const prompt = await dialog.showMessageBox({
+    type: "info",
+    buttons: [installable ? "Download update" : "Open download", "Later"],
+    defaultId: 0,
+    cancelId: 1,
+    title: state.productName || "OpenCom",
+    message: `${state.productName || "OpenCom"} ${state.latestVersion || ""} is available`,
+    detail: `You are currently on ${state.currentVersion}. ${
+      installable
+        ? "OpenCom can download the installer now and hand it off to your system."
+        : "OpenCom can open the official download for you now."
+    }`,
+    noLink: true,
+  });
+
+  if (prompt.response !== 0) {
+    setDesktopUpdateState({ lastAction: "dismissed" });
+    return getDesktopUpdateState();
+  }
+
+  await installAvailableDesktopUpdate();
+  return getDesktopUpdateState();
+}
+
+async function checkForDesktopUpdates({
+  promptIfAvailable = false,
+} = {}) {
+  if (desktopUpdateState.checking) return getDesktopUpdateState();
+
+  setDesktopUpdateState({
+    checking: true,
+    error: "",
+    currentVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+  });
+
+  try {
+    const release = await fetchDesktopReleaseInfo();
+    const computedUpdateAvailable = Boolean(
+      release.artifact &&
+        release.latestVersion &&
+        compareVersionStrings(release.latestVersion, app.getVersion()) > 0,
+    );
+
+    setDesktopUpdateState({
+      checking: false,
+      checkedAt: release.checkedAt,
+      latestVersion: release.latestVersion,
+      productName: release.productName,
+      artifact: release.artifact,
+      sourceUrl: release.sourceUrl,
+      updateAvailable: computedUpdateAvailable,
+      lastAction: computedUpdateAvailable ? "update-available" : "up-to-date",
+      error: "",
+    });
+
+    if (promptIfAvailable && computedUpdateAvailable) {
+      await promptForAvailableDesktopUpdate();
+    }
+  } catch (error) {
+    const message = error?.message || String(error);
+    setDesktopUpdateState({
+      checking: false,
+      checkedAt: new Date().toISOString(),
+      updateAvailable: false,
+      artifact: null,
+      lastAction: "check-failed",
+      error: message,
+    });
+    log.warn("Desktop update check failed", error);
+  }
+
+  return getDesktopUpdateState();
+}
+
+function scheduleDesktopUpdateCheck() {
+  if (!AUTO_UPDATE_CHECK_ENABLED || autoUpdateCheckScheduled) return;
+  autoUpdateCheckScheduled = true;
+  setTimeout(() => {
+    checkForDesktopUpdates({ promptIfAvailable: true }).catch((error) => {
+      log.warn("Desktop update check crashed", error);
+    });
+  }, 1500);
 }
 
 function nativeImageToDataUrl(image) {
@@ -672,10 +996,29 @@ ipcMain.handle("desktop:display-source:pick", async () => {
   }
 });
 
+ipcMain.handle("desktop:app:get-info", () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  arch: process.arch,
+}));
+
+ipcMain.handle("desktop:update:get", () => getDesktopUpdateState());
+
+ipcMain.handle("desktop:update:check", async (_event, payload = {}) => {
+  const promptIfAvailable = payload?.promptIfAvailable === true;
+  const state = await checkForDesktopUpdates({ promptIfAvailable });
+  return state;
+});
+
+ipcMain.handle("desktop:update:install", async () => {
+  return installAvailableDesktopUpdate();
+});
+
 app.whenReady().then(() => {
   installMediaHandlers();
   startLocalRpcBridge();
   createWindow();
+  scheduleDesktopUpdateCheck();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -23,12 +23,17 @@ For a complete endpoint inventory and feature matrix, see:
 
 If you only want infra in Docker and run services on host:
 
-1. `docker compose up -d mariadb-core mariadb-node redis minio`
+1. `docker compose up -d mariadb-core mariadb-node redis`
 2. `npm install`
 3. `npm run migrate:core && npm run migrate:node`
 4. Start services:
    - Core: `npm run dev:core`
    - Node: `npm run dev:node`
+
+Optional: MinIO is not used by the current app stack. If you still want it for manual object-storage testing, start it explicitly:
+
+- `docker compose --profile optional-storage up -d minio`
+- default host bindings: `127.0.0.1:9100` (API) and `127.0.0.1:9101` (console)
 
 ## Key Backend Features
 

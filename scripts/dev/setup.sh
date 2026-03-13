@@ -61,8 +61,14 @@ setup_backend() {
   if COMPOSE_CMD="$(pick_compose)"; then
     echo "[setup] Starting backend infrastructure with ${COMPOSE_CMD}"
     pushd "$ROOT_DIR" >/dev/null
-    # shellcheck disable=SC2086
-    ${COMPOSE_CMD} up -d mariadb-core mariadb-node redis minio
+    if [[ "${OPENCOM_WITH_MINIO:-0}" == "1" ]]; then
+      echo "[setup] OPENCOM_WITH_MINIO=1, enabling optional MinIO profile"
+      # shellcheck disable=SC2086
+      ${COMPOSE_CMD} --profile optional-storage up -d mariadb-core mariadb-node redis minio
+    else
+      # shellcheck disable=SC2086
+      ${COMPOSE_CMD} up -d mariadb-core mariadb-node redis
+    fi
     popd >/dev/null
   else
     echo "[warn] Docker Compose not found (neither 'docker compose' nor 'docker-compose'), skipping infrastructure startup"
