@@ -12,14 +12,13 @@ import { BlogPostPage } from "./components/BlogPostPage";
 import { parseBlogMarkdown } from "./lib/blogMarkdown";
 import {
   IncomingCallToast,
-  ActiveCallBar,
   CallMessageCard,
   OutgoingCallToast,
 } from "./components/PrivateCallOverlay";
 import { ServerRailNav } from "./components/app/ServerRailNav";
 import { FriendsSurface } from "./components/app/FriendsSurface";
 import { ProfileStudioPage } from "./components/app/ProfileStudioPage";
-import { VoiceShareOverlay } from "./components/app/VoiceShareOverlay";
+import { VoiceCallStage } from "./components/app/VoiceCallStage";
 import { AppContextMenus } from "./components/app/AppContextMenus";
 import { AddServerModal } from "./components/app/AddServerModal";
 import { FavouriteMediaModal } from "./components/app/FavouriteMediaModal";
@@ -1739,6 +1738,7 @@ export function App() {
   const [outgoingCall, setOutgoingCall] = useState(null);
   // activePrivateCall: set once both sides are in the call
   const [activePrivateCall, setActivePrivateCall] = useState(null);
+  const [privateCallViewOpen, setPrivateCallViewOpen] = useState(false);
   // seconds elapsed since the call connected (driven by useEffect below)
   const [callDuration, setCallDuration] = useState(0);
   // ──────────────────────────────────────────────────────────────────────────
@@ -1751,7 +1751,6 @@ export function App() {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [selectedScreenShareProducerId, setSelectedScreenShareProducerId] =
     useState("");
-  const [screenShareOverlayOpen, setScreenShareOverlayOpen] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
   const [isMicMonitorActive, setIsMicMonitorActive] = useState(false);
@@ -2900,6 +2899,9 @@ export function App() {
     () => dms.find((dm) => dm.id === activeDmId) || null,
     [dms, activeDmId],
   );
+  const showServerVoiceStage = navMode === "servers" && activeChannel?.type === "voice";
+  const showPrivateCallStage =
+    navMode === "dms" && !!activePrivateCall?.callId && privateCallViewOpen;
   activeServerMessagesRef.current = messages;
   activeDmMessagesRef.current = activeDm?.messages || [];
   const installedServerExtensionById = useMemo(
@@ -3259,6 +3261,58 @@ export function App() {
     [resolvedMemberList],
   );
 
+  const voiceIdentityByUserId = useMemo(() => {
+    const map = new Map();
+
+    for (const member of resolvedMemberList) {
+      if (!member?.id) continue;
+      map.set(member.id, {
+        username: member.username || member.id,
+        pfpUrl: member.pfp_url ? profileImageUrl(member.pfp_url) : null,
+        roleIds: member.roleIds || [],
+      });
+    }
+
+    for (const friend of friends) {
+      if (!friend?.id || map.has(friend.id)) continue;
+      map.set(friend.id, {
+        username: friend.username || friend.id,
+        pfpUrl: friend.pfp_url ? profileImageUrl(friend.pfp_url) : null,
+        roleIds: [],
+      });
+    }
+
+    for (const dm of dms) {
+      const participantId = dm?.participantId || "";
+      if (!participantId || map.has(participantId)) continue;
+      map.set(participantId, {
+        username: dm.name || participantId,
+        pfpUrl: dm.pfp_url ? profileImageUrl(dm.pfp_url) : null,
+        roleIds: [],
+      });
+    }
+
+    if (me?.id) {
+      map.set(me.id, {
+        username:
+          profile?.displayName || profile?.username || me.username || "You",
+        pfpUrl: profile?.pfpUrl ? profileImageUrl(profile.pfpUrl) : null,
+        roleIds: [],
+      });
+    }
+
+    return map;
+  }, [
+    resolvedMemberList,
+    friends,
+    dms,
+    me?.id,
+    me?.username,
+    profile?.displayName,
+    profile?.username,
+    profile?.pfpUrl,
+  ]);
+
   const mergedVoiceStates = useMemo(() => {
     const base = guildState?.voiceStates || [];
     if (!activeGuildId) return base;
@@ -3318,18 +3372,119 @@ export function App() {
     }
     return map;
   }, [mergedVoiceStates, memberNameById, resolvedMemberList]);
+
+  const getVoiceParticipantsForContext = useMemo(
+    () => (guildId, channelId) => {
+      const normalizedGuildId = String(guildId || "").trim();
+      const normalizedChannelId = String(channelId || "").trim();
+      if (!normalizedGuildId || !normalizedChannelId) return [];
+
+      const byUserId = new Map();
+      const fallbackStates =
+        normalizedGuildId === activeGuildId ? mergedVoiceStates : [];
+
+      for (const state of fallbackStates) {
+        if (state?.channelId !== normalizedChannelId || !state?.userId) continue;
+        byUserId.set(state.userId, state);
+      }
+
+      for (const state of Object.values(voiceStatesByGuild[normalizedGuildId] || {})) {
+        if (state?.channelId !== normalizedChannelId || !state?.userId) continue;
+        byUserId.set(state.userId, state);
+      }
+
+      return Array.from(byUserId.values())
+        .map((state) => {
+          const identity = voiceIdentityByUserId.get(state.userId) || null;
+          const username =
+            identity?.username ||
+            memberNameById.get(state.userId) ||
+            (state.userId === me?.id
+              ? profile?.displayName || profile?.username || me?.username || "You"
+              : state.userId);
+          return {
+            userId: state.userId,
+            username,
+            pfpUrl: identity?.pfpUrl || null,
+            muted: !!state.muted,
+            deafened: !!state.deafened,
+            speaking: !!voiceSpeakingByGuild[normalizedGuildId]?.[state.userId],
+            isSelf: state.userId === me?.id,
+          };
+        })
+        .sort((left, right) => {
+          if (!!left.speaking !== !!right.speaking)
+            return left.speaking ? -1 : 1;
+          if (!!left.isSelf !== !!right.isSelf) return left.isSelf ? 1 : -1;
+          return String(left.username || "").localeCompare(
+            String(right.username || ""),
+          );
+        });
+    },
+    [
+      activeGuildId,
+      mergedVoiceStates,
+      voiceStatesByGuild,
+      voiceIdentityByUserId,
+      memberNameById,
+      me?.id,
+      me?.username,
+      profile?.displayName,
+      profile?.username,
+      voiceSpeakingByGuild,
+    ],
+  );
   const remoteScreenShares = useMemo(
     () => Object.values(remoteScreenSharesByProducerId),
     [remoteScreenSharesByProducerId],
   );
+  const enrichedRemoteScreenShares = useMemo(
+    () =>
+      remoteScreenShares.map((share) => {
+        const identity = voiceIdentityByUserId.get(share.userId) || null;
+        return {
+          ...share,
+          userName: identity?.username || share.userId || "Screen Share",
+          userPfp: identity?.pfpUrl || null,
+        };
+      }),
+    [remoteScreenShares, voiceIdentityByUserId],
+  );
   const selectedRemoteScreenShare = useMemo(() => {
-    if (!remoteScreenShares.length) return null;
+    if (!enrichedRemoteScreenShares.length) return null;
     return (
-      remoteScreenShares.find(
+      enrichedRemoteScreenShares.find(
         (share) => share.producerId === selectedScreenShareProducerId,
-      ) || remoteScreenShares[0]
+      ) || enrichedRemoteScreenShares[0]
     );
-  }, [remoteScreenShares, selectedScreenShareProducerId]);
+  }, [enrichedRemoteScreenShares, selectedScreenShareProducerId]);
+
+  const isViewingConnectedServerVoice =
+    activeChannel?.type === "voice" &&
+    activeChannel?.id === voiceConnectedChannelId &&
+    activeGuildId === voiceConnectedGuildId;
+
+  const activeVoiceStageParticipants = useMemo(() => {
+    if (activeChannel?.type !== "voice") return [];
+    return getVoiceParticipantsForContext(activeGuildId, activeChannel.id);
+  }, [
+    activeChannel?.id,
+    activeChannel?.type,
+    activeGuildId,
+    getVoiceParticipantsForContext,
+  ]);
+
+  const privateCallParticipants = useMemo(() => {
+    if (!activePrivateCall?.channelId || !activePrivateCall?.guildId) return [];
+    return getVoiceParticipantsForContext(
+      activePrivateCall.guildId,
+      activePrivateCall.channelId,
+    );
+  }, [
+    activePrivateCall?.channelId,
+    activePrivateCall?.guildId,
+    getVoiceParticipantsForContext,
+  ]);
   const fullProfileViewerHasMusicElement = useMemo(() => {
     const elements = fullProfileViewer?.fullProfile?.elements;
     return (
@@ -4221,7 +4376,6 @@ export function App() {
   useEffect(() => {
     if (!remoteScreenShares.length) {
       setSelectedScreenShareProducerId("");
-      setScreenShareOverlayOpen(false);
       return;
     }
     const selectedStillExists = remoteScreenShares.some(
@@ -4231,10 +4385,6 @@ export function App() {
       setSelectedScreenShareProducerId(remoteScreenShares[0].producerId);
     }
   }, [remoteScreenShares, selectedScreenShareProducerId]);
-
-  useEffect(() => {
-    if (remoteScreenShares.length) setScreenShareOverlayOpen(true);
-  }, [remoteScreenShares.length]);
 
   useEffect(() => {
     setFullProfileViewerMusicPlaying(false);
@@ -4583,6 +4733,7 @@ export function App() {
             msg.d?.callId
           ) {
             const endedId = msg.d.callId;
+            setPrivateCallViewOpen(false);
             setIncomingCall((prev) => (prev?.callId === endedId ? null : prev));
             setOutgoingCall((prev) => (prev?.callId === endedId ? null : prev));
             setActivePrivateCall((prev) => {
@@ -9492,7 +9643,6 @@ export function App() {
     setIsScreenSharing(false);
     setRemoteScreenSharesByProducerId({});
     setSelectedScreenShareProducerId("");
-    setScreenShareOverlayOpen(false);
   }
 
   async function waitForVoiceGatewayReady(timeoutMs = 15000) {
@@ -9581,7 +9731,23 @@ export function App() {
     const id = String(producerId || "").trim();
     if (!id) return;
     setSelectedScreenShareProducerId(id);
-    setScreenShareOverlayOpen(true);
+  }
+
+  function openCurrentCallView() {
+    if (activePrivateCall?.callId) {
+      setNavMode("dms");
+      setPrivateCallViewOpen(true);
+      return;
+    }
+    if (!voiceConnectedChannelId) return;
+    if (voiceConnectedServer?.id) {
+      setActiveServerId(voiceConnectedServer.id);
+    }
+    if (voiceConnectedGuildId) {
+      setActiveGuildId(voiceConnectedGuildId);
+    }
+    setNavMode("servers");
+    setActiveChannelId(voiceConnectedChannelId);
   }
 
   async function setServerVoiceMemberState(channelId, memberId, patch = {}) {
@@ -9858,7 +10024,9 @@ export function App() {
         guildId,
         nodeBaseUrl,
         otherName: incomingCall?.callerName || outgoingCall?.calleeName || "",
+        otherPfp: incomingCall?.callerPfp || outgoingCall?.calleePfp || null,
       });
+      setPrivateCallViewOpen(true);
       setOutgoingCall(null);
       setCallDuration(0);
       setStatus("Voice call connected.");
@@ -9884,6 +10052,7 @@ export function App() {
   async function endPrivateCall() {
     const call = activePrivateCall;
     setActivePrivateCall(null);
+    setPrivateCallViewOpen(false);
     setOutgoingCall(null);
     setIncomingCall(null);
     setCallDuration(0);
@@ -9924,6 +10093,7 @@ export function App() {
   useEffect(() => {
     if (!activePrivateCall) {
       setCallDuration(0);
+      setPrivateCallViewOpen(false);
       return;
     }
     const id = setInterval(() => setCallDuration((d) => d + 1), 1000);
@@ -11894,49 +12064,27 @@ export function App() {
                   ⚙️
                 </button>
               </div>
-              {!!remoteScreenShares.length && (
-                <div className="voice-screen-grid">
-                  {remoteScreenShares.map((share) => {
-                    const isSelected =
-                      selectedRemoteScreenShare?.producerId ===
-                      share.producerId;
-                    return (
-                      <button
-                        type="button"
-                        className={`voice-screen-tile ${isSelected ? "active" : ""}`}
-                        key={share.producerId}
-                        onClick={() => selectScreenShare(share.producerId)}
-                        title="Show this share in overlay"
-                      >
-                        <video
-                          autoPlay
-                          playsInline
-                          muted
-                          ref={(node) => {
-                            if (!node || !share.stream) return;
-                            if (node.srcObject !== share.stream)
-                              node.srcObject = share.stream;
-                          }}
-                        />
-                        <span>
-                          {memberNameById.get(share.userId) ||
-                            share.userId ||
-                            "Screen Share"}
-                        </span>
-                      </button>
-                    );
-                  })}
+              <div className="voice-widget-summary">
+                <div>
+                  <strong>
+                    {remoteScreenShares.length
+                      ? `${remoteScreenShares.length} live ${
+                          remoteScreenShares.length === 1 ? "share" : "shares"
+                        }`
+                      : activePrivateCall?.callId
+                        ? "Private call live"
+                        : "Voice room live"}
+                  </strong>
+                  <span>
+                    {activePrivateCall?.callId
+                      ? "Open the call stage to switch screens or go fullscreen."
+                      : "Jump back into the full call view anytime."}
+                  </span>
                 </div>
-              )}
-              {!!remoteScreenShares.length && !screenShareOverlayOpen && (
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => setScreenShareOverlayOpen(true)}
-                >
-                  Show Screen Overlay
+                <button type="button" className="ghost" onClick={openCurrentCallView}>
+                  View call
                 </button>
-              )}
+              </div>
             </div>
           )}
 
@@ -12075,46 +12223,115 @@ export function App() {
           </div>
         )}
         {navMode === "servers" && servers.length > 0 && (
-          <div className="chat-layout">
-            <section className="chat-main">
+          <div className={`chat-layout ${showServerVoiceStage ? "chat-layout-voice" : ""}`}>
+            <section
+              className={`chat-main ${showServerVoiceStage ? "chat-main-voice-stage" : ""}`}
+            >
               <header className="chat-header">
                 <h3>
-                  <span className="channel-hash">#</span>{" "}
+                  <span className="channel-hash">
+                    {activeChannel?.type === "voice" ? "🔊" : "#"}
+                  </span>{" "}
                   {activeChannel?.name || "updates"}
                 </h3>
                 <div className="chat-actions">
-                  <button
-                    className="icon-btn ghost"
-                    title="Pinned messages"
-                    onClick={() => setShowPinned((value) => !value)}
-                  >
-                    📌
-                  </button>
-                  <button className="icon-btn ghost" title="Threads">
-                    🧵
-                  </button>
-                  <button className="icon-btn ghost" title="Notifications">
-                    🔔
-                  </button>
-                  <button className="icon-btn ghost" title="Members">
-                    👥
-                  </button>
-                  <input
-                    className="search-input"
-                    placeholder={`Search ${activeServer?.name || "server"}`}
-                  />
-                  <button
-                    className="ghost"
-                    onClick={() => {
-                      setSettingsOpen(true);
-                      setSettingsTab("server");
-                    }}
-                  >
-                    Open settings
-                  </button>
+                  {showServerVoiceStage ? (
+                    <>
+                      {isViewingConnectedServerVoice ? (
+                        <button
+                          className="icon-btn ghost"
+                          title={isScreenSharing ? "Stop screen share" : "Start screen share"}
+                          onClick={toggleScreenShare}
+                        >
+                          {isScreenSharing ? "🖥️" : "📺"}
+                        </button>
+                      ) : null}
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setSettingsOpen(true);
+                          setSettingsTab("voice");
+                        }}
+                      >
+                        Voice settings
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="icon-btn ghost"
+                        title="Pinned messages"
+                        onClick={() => setShowPinned((value) => !value)}
+                      >
+                        📌
+                      </button>
+                      <button className="icon-btn ghost" title="Threads">
+                        🧵
+                      </button>
+                      <button className="icon-btn ghost" title="Notifications">
+                        🔔
+                      </button>
+                      <button className="icon-btn ghost" title="Members">
+                        👥
+                      </button>
+                      <input
+                        className="search-input"
+                        placeholder={`Search ${activeServer?.name || "server"}`}
+                      />
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setSettingsOpen(true);
+                          setSettingsTab("server");
+                        }}
+                      >
+                        Open settings
+                      </button>
+                    </>
+                  )}
                 </div>
               </header>
 
+              {showServerVoiceStage ? (
+                <VoiceCallStage
+                  title={activeChannel?.name || "Voice room"}
+                  subtitle={
+                    isViewingConnectedServerVoice
+                      ? `Connected to ${activeServer?.name || "this server"}`
+                      : `Preview the room before you join ${activeServer?.name || "the server"}`
+                  }
+                  participants={activeVoiceStageParticipants}
+                  remoteScreenShares={
+                    isViewingConnectedServerVoice ? enrichedRemoteScreenShares : []
+                  }
+                  selectedRemoteScreenShare={
+                    isViewingConnectedServerVoice ? selectedRemoteScreenShare : null
+                  }
+                  onSelectScreenShare={selectScreenShare}
+                  isConnected={!!isViewingConnectedServerVoice}
+                  isMuted={isMuted}
+                  isDeafened={isDeafened}
+                  isScreenSharing={isScreenSharing}
+                  onToggleMute={() => setIsMuted((value) => !value)}
+                  onToggleDeafen={() => setIsDeafened((value) => !value)}
+                  onToggleScreenShare={toggleScreenShare}
+                  onJoin={() => joinVoiceChannel(activeChannel)}
+                  onLeave={leaveVoiceChannel}
+                  joinLabel="Join this room"
+                  leaveLabel="Leave room"
+                  emptyTitle={
+                    isViewingConnectedServerVoice
+                      ? "No one is sharing yet"
+                      : "Jump into the room"
+                  }
+                  emptyDescription={
+                    isViewingConnectedServerVoice
+                      ? "Everyone in the voice room appears here, and live shares can be focused in fullscreen."
+                      : "Join this voice room to hear the call, watch live shares, and pop them fullscreen."
+                  }
+                />
+              ) : (
+                <>
               {showPinned && activePinnedServerMessages.length > 0 && (
                 <div className="pinned-strip">
                   {activePinnedServerMessages.slice(0, 3).map((item) => (
@@ -12681,8 +12898,11 @@ export function App() {
                   Send
                 </button>
               </footer>
+                </>
+              )}
             </section>
 
+            {!showServerVoiceStage && (
             <aside className="members-pane">
               <h4>Members — {resolvedMemberList.length}</h4>
               {(() => {
@@ -12796,11 +13016,14 @@ export function App() {
                 <p className="hint">No visible members yet.</p>
               )}
             </aside>
+            )}
           </div>
         )}
 
         {navMode === "dms" && (
-          <section className="chat-main">
+          <section
+            className={`chat-main ${showPrivateCallStage ? "chat-main-voice-stage" : ""}`}
+          >
             <header className="chat-header dm-header-actions">
               <div className="dm-header-meta">
                 <h3>{activeDm ? `@ ${activeDm.name}` : "Direct Messages"}</h3>
@@ -12839,6 +13062,15 @@ export function App() {
                 {activePrivateCall && (
                   <button
                     className="icon-btn ghost"
+                    title={showPrivateCallStage ? "Back to chat" : "View call"}
+                    onClick={() => setPrivateCallViewOpen((value) => !value)}
+                  >
+                    {showPrivateCallStage ? "💬" : "🖥️"}
+                  </button>
+                )}
+                {activePrivateCall && (
+                  <button
+                    className="icon-btn ghost"
                     style={{ color: "var(--danger, #ef5f76)" }}
                     title="End call"
                     onClick={endPrivateCall}
@@ -12855,6 +13087,31 @@ export function App() {
                 </button>
               </div>
             </header>
+            {showPrivateCallStage ? (
+              <VoiceCallStage
+                title={activePrivateCall?.otherName || activeDm?.name || "Private call"}
+                subtitle="Private voice call with live screen sharing"
+                participants={privateCallParticipants}
+                remoteScreenShares={enrichedRemoteScreenShares}
+                selectedRemoteScreenShare={selectedRemoteScreenShare}
+                onSelectScreenShare={selectScreenShare}
+                isConnected
+                isMuted={isMuted}
+                isDeafened={isDeafened}
+                isScreenSharing={isScreenSharing}
+                duration={callDuration}
+                onToggleMute={() => setIsMuted((value) => !value)}
+                onToggleDeafen={() => setIsDeafened((value) => !value)}
+                onToggleScreenShare={toggleScreenShare}
+                onLeave={endPrivateCall}
+                onClose={() => setPrivateCallViewOpen(false)}
+                showClose
+                leaveLabel="End call"
+                emptyTitle="Focus the conversation"
+                emptyDescription="Screen shares, participant cards, and fullscreen viewing all live here while the private call is active."
+              />
+            ) : (
+              <>
             {showPinned && activePinnedDmMessages.length > 0 && (
               <div className="pinned-strip">
                 {activePinnedDmMessages.slice(0, 3).map((item) => (
@@ -13124,6 +13381,8 @@ export function App() {
                 Send
               </button>
             </footer>
+              </>
+            )}
           </section>
         )}
 
@@ -13184,16 +13443,6 @@ export function App() {
             onAudioFieldUpload={onAudioFieldUpload}
           />
         )}
-        <VoiceShareOverlay
-          isInVoiceChannel={isInVoiceChannel}
-          navMode={navMode}
-          screenShareOverlayOpen={screenShareOverlayOpen}
-          selectedRemoteScreenShare={selectedRemoteScreenShare}
-          remoteScreenShares={remoteScreenShares}
-          selectScreenShare={selectScreenShare}
-          memberNameById={memberNameById}
-          setScreenShareOverlayOpen={setScreenShareOverlayOpen}
-        />
       </main>
 
       <AppContextMenus

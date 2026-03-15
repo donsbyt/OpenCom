@@ -246,6 +246,8 @@ const editStyles = StyleSheet.create({
 // ─── Voice members panel ──────────────────────────────────────────────────────
 
 function VoiceMembersPanel({ voiceStates }: { voiceStates: VoiceState[] }) {
+  const spotlightMembers = voiceStates.slice(0, 3);
+
   if (voiceStates.length === 0) {
     return (
       <View style={voiceStyles.empty}>
@@ -258,9 +260,64 @@ function VoiceMembersPanel({ voiceStates }: { voiceStates: VoiceState[] }) {
       style={voiceStyles.container}
       contentContainerStyle={voiceStyles.content}
     >
+      <View style={voiceStyles.hero}>
+        <View style={voiceStyles.heroCopy}>
+          <Text style={voiceStyles.heroEyebrow}>LIVE VOICE</Text>
+          <Text style={voiceStyles.heroTitle}>
+            {voiceStates.length} {voiceStates.length === 1 ? "person is" : "people are"} in the room
+          </Text>
+          <Text style={voiceStyles.heroText}>
+            Track who is active here, then jump to the web or desktop app for
+            the full live call stage and screen sharing.
+          </Text>
+        </View>
+
+        <View style={voiceStyles.spotlightRow}>
+          {spotlightMembers.map((vs) => (
+            <View key={`spotlight-${vs.userId}`} style={voiceStyles.spotlightCard}>
+              <Avatar
+                username={vs.username}
+                pfpUrl={vs.pfp_url}
+                size={40}
+                status="online"
+                showStatus={false}
+              />
+              <Text style={voiceStyles.spotlightName} numberOfLines={1}>
+                {vs.username ?? vs.userId}
+              </Text>
+              <Text style={voiceStyles.spotlightState}>
+                {vs.speaking
+                  ? "Speaking"
+                  : vs.deafened
+                    ? "Deafened"
+                    : vs.muted
+                      ? "Muted"
+                      : "Listening"}
+              </Text>
+            </View>
+          ))}
+        </View>
+      </View>
+
+      <View style={voiceStyles.summaryRow}>
+        <View style={voiceStyles.summaryPill}>
+          <Text style={voiceStyles.summaryLabel}>Members</Text>
+          <Text style={voiceStyles.summaryValue}>{voiceStates.length}</Text>
+        </View>
+        <View style={voiceStyles.summaryPill}>
+          <Text style={voiceStyles.summaryLabel}>Speaking</Text>
+          <Text style={voiceStyles.summaryValue}>
+            {voiceStates.filter((entry) => entry.speaking).length}
+          </Text>
+        </View>
+        <View style={voiceStyles.summaryPill}>
+          <Text style={voiceStyles.summaryLabel}>Shares</Text>
+          <Text style={voiceStyles.summaryValue}>Web/Desktop</Text>
+        </View>
+      </View>
+
       <Text style={voiceStyles.heading}>
-        🔊 Voice — {voiceStates.length}{" "}
-        {voiceStates.length === 1 ? "member" : "members"}
+        Room roster
       </Text>
       {voiceStates.map((vs) => (
         <View key={vs.userId} style={voiceStyles.row}>
@@ -297,6 +354,78 @@ function VoiceMembersPanel({ voiceStates }: { voiceStates: VoiceState[] }) {
 const voiceStyles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   content: { padding: spacing.md, gap: spacing.sm },
+  hero: {
+    gap: spacing.md,
+    padding: spacing.lg,
+    borderRadius: radii.lg,
+    backgroundColor: colors.sidebar,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  heroCopy: { gap: spacing.xs },
+  heroEyebrow: {
+    ...typography.caption,
+    color: colors.brand,
+    letterSpacing: 1.1,
+    fontWeight: "700",
+  },
+  heroTitle: {
+    ...typography.title,
+    color: colors.text,
+  },
+  heroText: {
+    ...typography.body,
+    color: colors.textDim,
+  },
+  spotlightRow: {
+    flexDirection: "row",
+    gap: spacing.sm,
+    flexWrap: "wrap",
+  },
+  spotlightCard: {
+    minWidth: 92,
+    flexGrow: 1,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    backgroundColor: colors.elev,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+    gap: spacing.xs,
+  },
+  spotlightName: {
+    ...typography.body,
+    color: colors.text,
+    fontWeight: "600",
+  },
+  spotlightState: {
+    ...typography.caption,
+    color: colors.textDim,
+  },
+  summaryRow: {
+    flexDirection: "row",
+    gap: spacing.sm,
+    flexWrap: "wrap",
+  },
+  summaryPill: {
+    flexGrow: 1,
+    minWidth: 92,
+    borderRadius: 999,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.elev,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  summaryLabel: {
+    ...typography.caption,
+    color: colors.textDim,
+  },
+  summaryValue: {
+    ...typography.body,
+    color: colors.text,
+    fontWeight: "700",
+  },
   empty: {
     flex: 1,
     justifyContent: "center",
@@ -311,7 +440,6 @@ const voiceStyles = StyleSheet.create({
   heading: {
     ...typography.heading,
     color: colors.text,
-    marginBottom: spacing.sm,
   },
   row: {
     flexDirection: "row",
@@ -792,10 +920,11 @@ export function ChannelScreen({
         />
         <View style={styles.voiceWrap}>
           <SurfaceCard style={styles.voiceIntro}>
-            <Text style={styles.voiceIntroTitle}>Voice overview</Text>
+            <Text style={styles.voiceIntroTitle}>Voice stage</Text>
             <Text style={styles.voiceIntroText}>
-              See who is connected here right now. Joining voice is still handled
-              by the desktop and web clients.
+              This mobile view now mirrors the live call stage layout. Audio,
+              live screen shares, and fullscreen viewing still run on the web
+              and desktop clients.
             </Text>
           </SurfaceCard>
           <VoiceMembersPanel voiceStates={voiceStates} />
