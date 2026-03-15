@@ -5,11 +5,153 @@ import { requireGuildMember } from "../auth/requireGuildMember.js";
 import { canEditRole, isGuildOwner, requireManageRoles, rolePosition } from "../permissions/hierarchy.js";
 import { resolveChannelPermissions } from "../permissions/resolve.js";
 import { Perm, has } from "../permissions/bits.js";
+import { resolveCoreUserProfiles } from "../userDirectory.js";
 
 export async function memberRoutes(
   app: FastifyInstance,
   broadcastGuild: (guildId: string, t: string, d: any) => void
 ) {
+  app.get("/v1/guilds/:guildId/members", { preHandler: [app.authenticate] } as any, async (req: any, rep) => {
+    const { guildId } = z.object({ guildId: z.string().min(3) }).parse(req.params);
+    const userId = req.auth.userId as string;
+
+    try { await requireGuildMember(guildId, userId, req.auth.roles, req.auth.coreServerId); }
+    catch { return rep.code(403).send({ error: "NOT_GUILD_MEMBER" }); }
+
+    const members = await q<{ user_id: string; nick: string | null; joined_at: string }>(
+      `SELECT user_id,nick,joined_at
+       FROM guild_members
+       WHERE guild_id=:guildId
+       ORDER BY joined_at ASC`,
+      { guildId }
+    );
+
+    const memberRoleRows = await q<{ user_id: string; role_id: string }>(
+      `SELECT user_id,role_id
+       FROM member_roles
+       WHERE guild_id=:guildId`,
+      { guildId }
+    );
+    const roleIdsByUser = new Map<string, string[]>();
+    for (const row of memberRoleRows) {
+      if (!roleIdsByUser.has(row.user_id)) roleIdsByUser.set(row.user_id, []);
+      roleIdsByUser.get(row.user_id)!.push(row.role_id);
+    }
+
+    const profiles = await resolveCoreUserProfiles(members.map((member) => member.user_id));
+
+    return rep.send({
+      members: members.map((member) => ({
+        id: member.user_id,
+        username: profiles.get(member.user_id)?.username || member.user_id,
+        displayName: member.nick || profiles.get(member.user_id)?.displayName || null,
+        pfp_url: profiles.get(member.user_id)?.pfpUrl ?? null,
+        status: "online",
+        roleIds: roleIdsByUser.get(member.user_id) || []
+      }))
+    });
+  });
+
+  app.get("/v1/guilds/:guildId/voice-states", { preHandler: [app.authenticate] } as any, async (req: any, rep) => {
+    const { guildId } = z.object({ guildId: z.string().min(3) }).parse(req.params);
+    const userId = req.auth.userId as string;
+
+    try { await requireGuildMember(guildId, userId, req.auth.roles, req.auth.coreServerId); }
+    catch { return rep.code(403).send({ error: "NOT_GUILD_MEMBER" }); }
+
+    const allChannels = await q<{ id: string }>(
+      `SELECT id FROM channels WHERE guild_id=:guildId`,
+      { guildId }
+    );
+    const visibleChannelSet = new Set<string>();
+    for (const channel of allChannels) {
+      const perms = await resolveChannelPermissions({
+        guildId,
+        channelId: channel.id,
+        userId,
+        roles: req.auth.roles || []
+      });
+      if (has(perms, Perm.VIEW_CHANNEL)) visibleChannelSet.add(channel.id);
+    }
+
+    const voiceStates = await q<{ user_id: string; channel_id: string; muted: number; deafened: number; updated_at: string }>(
+      `SELECT user_id,channel_id,muted,deafened,updated_at
+       FROM voice_states
+       WHERE guild_id=:guildId`,
+      { guildId }
+    );
+
+    const filtered = voiceStates.filter((entry) => visibleChannelSet.has(entry.channel_id));
+    const profiles = await resolveCoreUserProfiles(filtered.map((entry) => entry.user_id));
+
+    return rep.send({
+      voiceStates: filtered.map((entry) => ({
+        userId: entry.user_id,
+        username: profiles.get(entry.user_id)?.username || entry.user_id,
+        pfp_url: profiles.get(entry.user_id)?.pfpUrl ?? null,
+        guildId,
+        channelId: entry.channel_id,
+        muted: !!entry.muted,
+        deafened: !!entry.deafened,
+        updatedAt: entry.updated_at
+      }))
+    });
+  });
+
+  app.get("/v1/guilds/:guildId/bans", { preHandler: [app.authenticate] } as any, async (req: any, rep) => {
+    const { guildId } = z.object({ guildId: z.string().min(3) }).parse(req.params);
+    const actorId = req.auth.userId as string;
+
+    try { await requireGuildMember(guildId, actorId, req.auth.roles, req.auth.coreServerId); }
+    catch { return rep.code(403).send({ error: "NOT_GUILD_MEMBER" }); }
+
+    const actorCanBan = await requireModerationPermission(guildId, actorId, req.auth.roles || [], Perm.BAN_MEMBERS);
+    if (!actorCanBan) return rep.code(403).send({ error: "MISSING_PERMS" });
+
+    const bans = await q<{ user_id: string; reason: string | null; banned_by: string; created_at: string }>(
+      `SELECT user_id, reason, banned_by, created_at
+       FROM guild_bans
+       WHERE guild_id=:guildId
+       ORDER BY created_at DESC`,
+      { guildId }
+    );
+
+    const profiles = await resolveCoreUserProfiles(
+      Array.from(new Set(bans.flatMap((row) => [row.user_id, row.banned_by])))
+    );
+
+    return rep.send({
+      bans: bans.map((row) => ({
+        userId: row.user_id,
+        username: profiles.get(row.user_id)?.username || row.user_id,
+        displayName: profiles.get(row.user_id)?.displayName || null,
+        pfp_url: profiles.get(row.user_id)?.pfpUrl ?? null,
+        reason: row.reason ?? null,
+        bannedBy: row.banned_by,
+        bannedByUsername: profiles.get(row.banned_by)?.username || row.banned_by,
+        createdAt: row.created_at
+      }))
+    });
+  });
+
+  app.get("/v1/members/:userId/profile", { preHandler: [app.authenticate] } as any, async (req: any, rep) => {
+    const { userId } = z.object({ userId: z.string().min(3) }).parse(req.params);
+    const profiles = await resolveCoreUserProfiles([userId]);
+    const profile = profiles.get(userId);
+    if (!profile) return rep.code(404).send({ error: "USER_NOT_FOUND" });
+
+    return rep.send({
+      id: userId,
+      username: profile.username,
+      displayName: profile.displayName,
+      pfp_url: profile.pfpUrl,
+      banner_url: null,
+      bio: null,
+      status: "offline",
+      roles: []
+    });
+  });
+
   async function requireModerationPermission(
     guildId: string,
     actorId: string,
