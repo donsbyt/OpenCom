@@ -1,0 +1,15 @@
+{
+  "id": "moderation-utils",
+  "name": "Moderation Utils",
+  "author": "donskyblock",
+  "version": "0.0.1",
+  "description": "A nice extension for the moderation of servers..",
+  "scope": "server",
+  "entry": "index.js",
+  "permissions": ["all"],
+  "configDefaults": {
+    "panelURL": "",
+    "syncSecret": ""
+  }
+}
+ 
