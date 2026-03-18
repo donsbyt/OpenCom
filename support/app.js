@@ -7,7 +7,6 @@ import {
   formatDateTime,
   getCoreApiBase,
   messageMarkup,
-  saveCoreApiBase,
   ticketBadgesMarkup,
 } from "./common.js";
 
@@ -19,8 +18,6 @@ const state = {
 
 const elements = {
   statusBanner: document.getElementById("public-status-banner"),
-  coreApiForm: document.getElementById("public-core-api-form"),
-  coreApiInput: document.getElementById("public-core-api-input"),
   createForm: document.getElementById("ticket-create-form"),
   createResult: document.getElementById("create-result"),
   lookupForm: document.getElementById("ticket-lookup-form"),
@@ -305,19 +302,10 @@ function handleLoadRecentTicket() {
   });
 }
 
-function handleCoreApiSave(event) {
-  event.preventDefault();
-  state.coreApi = saveCoreApiBase(elements.coreApiInput.value);
-  elements.coreApiInput.value = state.coreApi;
-  setBanner(`Core API saved as ${state.coreApi}.`, "success");
-}
-
 function boot() {
-  elements.coreApiInput.value = state.coreApi;
   renderSelectOptions(elements.createForm.elements.category, CATEGORY_OPTIONS);
   renderSelectOptions(elements.createForm.elements.priority, PRIORITY_OPTIONS);
 
-  elements.coreApiForm.addEventListener("submit", handleCoreApiSave);
   elements.createForm.addEventListener("submit", handleCreateSubmit);
   elements.lookupForm.addEventListener("submit", handleLookupSubmit);
   elements.replyForm.addEventListener("submit", handleReplySubmit);
