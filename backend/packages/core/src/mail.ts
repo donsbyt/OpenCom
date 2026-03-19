@@ -22,6 +22,18 @@ function formatTimestamp(value?: Date | string): string {
   return Number.isNaN(date.getTime()) ? String(value) : date.toUTCString();
 }
 
+function buildSupportPortalUrl(params?: Record<string, string | null | undefined>) {
+  const base = env.SUPPORT_BASE_URL.replace(/\/$/, "");
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params || {})) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) continue;
+    search.set(key, trimmed);
+  }
+  const query = search.toString();
+  return query ? `${base}/?${query}` : `${base}/`;
+}
+
 export async function sendVerificationEmail(to: string, verifyToken: string) {
   const base = env.APP_BASE_URL.replace(/\/$/, "");
   const verifyUrl = `${base}/?verifyEmailToken=${encodeURIComponent(verifyToken)}`;
@@ -62,10 +74,10 @@ export async function sendSigninEmail(to: string, input: SendSigninEmailInput) {
 }
 
 function buildSupportTicketUrl(ticketReference: string, accessKey?: string) {
-  const base = env.SUPPORT_BASE_URL.replace(/\/$/, "");
-  const params = new URLSearchParams({ reference: ticketReference });
-  if (accessKey) params.set("accessKey", accessKey);
-  return `${base}/?${params.toString()}`;
+  return buildSupportPortalUrl({
+    reference: ticketReference,
+    accessKey,
+  });
 }
 
 export async function sendSupportTicketCreatedEmail(
@@ -161,5 +173,39 @@ export async function sendSupportTicketStatusEmail(
       `<strong>New status:</strong> ${escapeHtml(input.nextStatusLabel)}</p>` +
       `<p>Open your ticket: <a href="${ticketUrl}">${ticketUrl}</a></p>` +
       `<p>Use the private access key from your original ticket confirmation email when reopening the thread.</p>`
+  });
+}
+
+export async function sendAccountBanEmail(
+  to: string,
+  input: {
+    username: string;
+    reason?: string | null;
+  }
+) {
+  const appealUrl = buildSupportPortalUrl({
+    category: "unban_appeal",
+    opencomUsername: input.username,
+  });
+  const supportUrl = buildSupportPortalUrl();
+  const reason = String(input.reason || "").trim();
+  const reasonText = reason || "No specific reason was attached to the ban action.";
+
+  await sendSmtpEmail({
+    to,
+    subject: "Your OpenCom account has been banned",
+    text:
+      `Your OpenCom account (@${input.username}) has been banned.\n\n` +
+      `Reason:\n${reasonText}\n\n` +
+      `If you believe this was a mistake, you can submit an appeal here:\n${appealUrl}\n\n` +
+      `General support portal:\n${supportUrl}\n\n` +
+      `When appealing, include your username, any relevant dates, and the context you want the support team to review.`,
+    html:
+      `<p>Your OpenCom account (<strong>@${escapeHtml(input.username)}</strong>) has been banned.</p>` +
+      `<p><strong>Reason:</strong><br />${escapeHtml(reasonText).replace(/\n/g, "<br />")}</p>` +
+      `<p>If you believe this was a mistake, you can submit an appeal here:</p>` +
+      `<p><a href="${appealUrl}">${appealUrl}</a></p>` +
+      `<p>General support portal: <a href="${supportUrl}">${supportUrl}</a></p>` +
+      `<p>When appealing, include your username, any relevant dates, and the context you want the support team to review.</p>`
   });
 }

@@ -12,6 +12,7 @@ export const CATEGORY_OPTIONS = [
   ["billing", "Billing"],
   ["bug_report", "Bug report"],
   ["feature_request", "Feature request"],
+  ["message_report", "Message report"],
   ["safety", "Safety"],
   ["other", "Other"],
 ];

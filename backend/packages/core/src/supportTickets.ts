@@ -14,6 +14,7 @@ export const SUPPORT_TICKET_CATEGORIES = [
   "billing",
   "bug_report",
   "feature_request",
+  "message_report",
   "safety",
   "other",
 ] as const;
@@ -76,6 +77,44 @@ export type SupportTicketDetail = {
 export type SupportEmailDelivery = {
   state: "sent" | "failed" | "skipped" | "unavailable";
   error: string | null;
+};
+
+export type MessageReportTicketSource = {
+  kind: "server" | "dm";
+  serverId?: string | null;
+  serverName?: string | null;
+  channelId?: string | null;
+  channelName?: string | null;
+  dmThreadId?: string | null;
+  dmTitle?: string | null;
+};
+
+export type MessageReportAttachment = {
+  fileName?: string | null;
+  contentType?: string | null;
+  url?: string | null;
+};
+
+export type MessageReportContextMessage = {
+  messageId?: string | null;
+  authorUserId?: string | null;
+  authorName?: string | null;
+  createdAt?: string | null;
+  content?: string | null;
+  attachments?: MessageReportAttachment[] | null;
+};
+
+export type MessageReportTicketInput = {
+  reporterUserId: string;
+  reporterEmail: string;
+  reporterUsername: string;
+  reporterDisplayName?: string | null;
+  reportedUserId: string;
+  reportedUsername: string;
+  reportNote?: string | null;
+  source: MessageReportTicketSource;
+  reportedMessage: MessageReportContextMessage;
+  contextMessages?: MessageReportContextMessage[] | null;
 };
 
 type SupportTicketRow = {
@@ -182,6 +221,8 @@ export function formatSupportCategoryLabel(category: SupportTicketCategory) {
       return "Bug report";
     case "feature_request":
       return "Feature request";
+    case "message_report":
+      return "Message report";
     case "safety":
       return "Safety";
     case "other":
@@ -189,6 +230,145 @@ export function formatSupportCategoryLabel(category: SupportTicketCategory) {
     default:
       return category;
   }
+}
+
+function truncateSingleLine(value: string, max: number) {
+  const cleaned = String(value || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, Math.max(1, max - 3)).trimEnd()}...`;
+}
+
+function truncateMultiline(value: string, max: number) {
+  const cleaned = String(value || "").replace(/\r/g, "").trim();
+  if (!cleaned) return "";
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, Math.max(1, max - 3)).trimEnd()}...`;
+}
+
+function cleanOptionalMessageId(value: string | null | undefined) {
+  return truncateSingleLine(String(value || ""), 96) || null;
+}
+
+function cleanOptionalUsername(value: string | null | undefined, fallback = "Unknown user") {
+  return truncateSingleLine(String(value || ""), 80) || fallback;
+}
+
+function cleanOptionalTimestamp(value: string | null | undefined) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return truncateSingleLine(raw, 96);
+  return date.toISOString();
+}
+
+function cleanReportAttachments(input: MessageReportAttachment[] | null | undefined) {
+  if (!Array.isArray(input) || !input.length) return [];
+  return input.slice(0, 8).map((attachment) => ({
+    fileName: truncateSingleLine(String(attachment?.fileName || ""), 180) || "Attachment",
+    contentType: truncateSingleLine(String(attachment?.contentType || ""), 120) || "",
+    url: truncateSingleLine(String(attachment?.url || ""), 512) || "",
+  }));
+}
+
+function cleanReportMessage(input: MessageReportContextMessage | null | undefined) {
+  return {
+    messageId: cleanOptionalMessageId(input?.messageId),
+    authorUserId: truncateSingleLine(String(input?.authorUserId || ""), 64) || null,
+    authorName: cleanOptionalUsername(input?.authorName, "Unknown user"),
+    createdAt: cleanOptionalTimestamp(input?.createdAt),
+    content: truncateMultiline(String(input?.content || ""), 4000),
+    attachments: cleanReportAttachments(input?.attachments),
+  };
+}
+
+function formatReportSourceLabel(source: MessageReportTicketSource) {
+  if (source.kind === "server") {
+    const serverName = truncateSingleLine(String(source.serverName || ""), 120);
+    const channelName = truncateSingleLine(String(source.channelName || ""), 120);
+    if (serverName && channelName) return `Server · ${serverName} / #${channelName}`;
+    if (serverName) return `Server · ${serverName}`;
+    if (channelName) return `Server channel · #${channelName}`;
+    return "Server";
+  }
+
+  const dmTitle = truncateSingleLine(String(source.dmTitle || ""), 120);
+  return dmTitle ? `Direct message · ${dmTitle}` : "Direct message";
+}
+
+function formatReportMessageSummary(
+  message: ReturnType<typeof cleanReportMessage>,
+  flaggedUserId: string
+) {
+  const lines = [
+    `Author: ${message.authorName}${message.authorUserId ? ` (${message.authorUserId})` : ""}`,
+  ];
+  if (message.authorUserId && message.authorUserId === flaggedUserId) {
+    lines[0] += " [reported account]";
+  }
+  if (message.createdAt) lines.push(`Sent at: ${message.createdAt}`);
+  if (message.messageId) lines.push(`Message ID: ${message.messageId}`);
+  lines.push("Content:");
+  lines.push(message.content || "[no text]");
+  if (message.attachments.length) {
+    lines.push("Attachments:");
+    for (const attachment of message.attachments) {
+      const attachmentBits = [attachment.fileName];
+      if (attachment.contentType) attachmentBits.push(attachment.contentType);
+      if (attachment.url) attachmentBits.push(attachment.url);
+      lines.push(`- ${attachmentBits.join(" · ")}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatMessageReportBody(input: MessageReportTicketInput) {
+  const sourceLabel = formatReportSourceLabel(input.source);
+  const reporterName = cleanOptionalUsername(
+    input.reporterDisplayName || input.reporterUsername,
+    input.reporterUsername || "Reporter"
+  );
+  const reportedMessage = cleanReportMessage(input.reportedMessage);
+  const contextMessages = Array.isArray(input.contextMessages)
+    ? input.contextMessages.slice(0, 7).map((entry) => cleanReportMessage(entry))
+    : [];
+  const note = truncateMultiline(String(input.reportNote || ""), 2000);
+  const blocks = [
+    `Message report for @${truncateSingleLine(input.reportedUsername, 64) || input.reportedUserId}`,
+    `Reported account ID: ${truncateSingleLine(input.reportedUserId, 64)}`,
+    `Reporter: ${reporterName} (${truncateSingleLine(input.reporterUserId, 64)})`,
+    `Reporter email: ${truncateSingleLine(input.reporterEmail, 190)}`,
+    `Source: ${sourceLabel}`,
+  ];
+
+  if (input.source.serverId) blocks.push(`Server ID: ${truncateSingleLine(input.source.serverId, 64)}`);
+  if (input.source.channelId) blocks.push(`Channel ID: ${truncateSingleLine(input.source.channelId, 64)}`);
+  if (input.source.dmThreadId) blocks.push(`DM thread ID: ${truncateSingleLine(input.source.dmThreadId, 64)}`);
+  if (note) {
+    blocks.push("");
+    blocks.push("Reporter note:");
+    blocks.push(note);
+  }
+
+  blocks.push("");
+  blocks.push("Reported message:");
+  blocks.push(formatReportMessageSummary(reportedMessage, input.reportedUserId));
+
+  if (contextMessages.length) {
+    blocks.push("");
+    blocks.push("Nearby context:");
+    for (const message of contextMessages) {
+      blocks.push("");
+      blocks.push(formatReportMessageSummary(message, input.reportedUserId));
+    }
+  }
+
+  return blocks.join("\n");
+}
+
+function buildMessageReportSubject(reportedUsername: string) {
+  const normalized = truncateSingleLine(reportedUsername, 64) || "reported-user";
+  return truncateSingleLine(`Message report: @${normalized}`, 180);
 }
 
 export function formatSupportPriorityLabel(priority: SupportTicketPriority) {
@@ -381,6 +561,7 @@ export async function createSupportTicket(input: {
   contactEmail: string;
   opencomUserId?: string | null;
   opencomUsername?: string | null;
+  reportTargetUserId?: string | null;
   subject: string;
   category: SupportTicketCategory;
   priority?: SupportTicketPriority;
@@ -396,11 +577,11 @@ export async function createSupportTicket(input: {
   await q(
     `INSERT INTO support_tickets (
        id, reference_code, access_key_hash, requester_name, contact_email,
-       opencom_user_id, opencom_username, subject, category, priority, status,
+       opencom_user_id, opencom_username, report_target_user_id, subject, category, priority, status,
        created_at, updated_at, last_activity_at, last_public_reply_at, closed_at
      ) VALUES (
        :id, :referenceCode, :accessKeyHash, :requesterName, :contactEmail,
-       :opencomUserId, :opencomUsername, :subject, :category, :priority, 'open',
+       :opencomUserId, :opencomUsername, :reportTargetUserId, :subject, :category, :priority, 'open',
        NOW(), NOW(), NOW(), NOW(), NULL
      )`,
     {
@@ -411,6 +592,7 @@ export async function createSupportTicket(input: {
       contactEmail: input.contactEmail.trim().toLowerCase(),
       opencomUserId: input.opencomUserId?.trim() || null,
       opencomUsername: input.opencomUsername?.trim() || null,
+      reportTargetUserId: input.reportTargetUserId?.trim() || null,
       subject: input.subject.trim(),
       category: input.category,
       priority,
@@ -441,6 +623,75 @@ export async function createSupportTicket(input: {
     ticket: serializeTicket(row),
     accessKey,
     emailDelivery,
+  };
+}
+
+export async function createOrAppendMessageReportTicket(input: MessageReportTicketInput) {
+  const reporterName =
+    truncateSingleLine(input.reporterDisplayName || "", 120) ||
+    truncateSingleLine(input.reporterUsername, 120) ||
+    null;
+  const subject = buildMessageReportSubject(input.reportedUsername);
+  const body = formatMessageReportBody(input);
+
+  const existingRows = await q<{ id: string }>(
+    `SELECT id
+       FROM support_tickets
+      WHERE category='message_report'
+        AND opencom_user_id=:reporterUserId
+        AND report_target_user_id=:reportedUserId
+        AND status IN ('open', 'waiting_on_staff', 'waiting_on_user')
+      ORDER BY last_activity_at DESC, created_at DESC
+      LIMIT 1`,
+    {
+      reporterUserId: input.reporterUserId,
+      reportedUserId: input.reportedUserId,
+    }
+  );
+
+  const existingTicketId = existingRows[0]?.id || "";
+  if (existingTicketId) {
+    await appendTicketMessage({
+      ticketId: existingTicketId,
+      authorType: "requester",
+      authorName: reporterName,
+      body,
+    });
+
+    const updated = await updateTicketState(existingTicketId, {
+      requesterName: reporterName,
+      subject,
+      status: "waiting_on_staff",
+      lastPublicReplyAt: true,
+    });
+
+    if (!updated) throw new Error("SUPPORT_TICKET_UPDATE_FAILED");
+
+    return {
+      mode: "appended" as const,
+      ticket: serializeTicket(updated),
+      accessKey: null,
+      emailDelivery: { state: "skipped" as const, error: null },
+    };
+  }
+
+  const created = await createSupportTicket({
+    requesterName: reporterName,
+    contactEmail: input.reporterEmail,
+    opencomUserId: input.reporterUserId,
+    opencomUsername: input.reporterUsername,
+    reportTargetUserId: input.reportedUserId,
+    subject,
+    category: "message_report",
+    priority: "high",
+    message: body,
+  });
+
+  return {
+    mode: "created" as const,
+    ticket: created.ticket,
+    accessKey: created.accessKey,
+    emailDelivery: created.emailDelivery,
   };
 }
 

@@ -24,8 +24,55 @@ function isAdminHost(rawHost = "") {
   return hostname === "supadmin.opencom.online" || hostname.startsWith("supadmin.");
 }
 
+function normalizeRequestTarget(rawValue = "/") {
+  let value = String(rawValue || "").trim();
+  if (!value) return "/";
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      value = `${parsed.pathname || "/"}${parsed.search || ""}`;
+    } catch {
+      return "/";
+    }
+  }
+
+  if (!value.startsWith("/")) value = `/${value}`;
+  value = value.replace(/^\/{2,}/, "/");
+  return value || "/";
+}
+
+function shouldServeHtmlNotFound(req, requestedPath = "") {
+  const ext = path.extname(String(requestedPath || "")).toLowerCase();
+  if (ext && ext !== ".html") return false;
+  const accept = String(req.headers.accept || "").toLowerCase();
+  if (!accept) return true;
+  return accept.includes("text/html") || accept.includes("*/*");
+}
+
+async function serveNotFound(req, res) {
+  if (!shouldServeHtmlNotFound(req, req.url || "")) {
+    res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "NOT_FOUND" }));
+    return;
+  }
+
+  try {
+    const body = await fs.readFile(path.join(__dirname, "404.html"));
+    res.writeHead(404, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-cache",
+    });
+    res.end(body);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("<h1>404</h1><p>Page not found.</p>");
+  }
+}
+
 function resolveRequestFile(req) {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const requestTarget = normalizeRequestTarget(req.url || "/");
+  const url = new URL(requestTarget, `http://${req.headers.host || "localhost"}`);
   const pathname = decodeURIComponent(url.pathname || "/");
 
   if (pathname === "/health") return { kind: "health" };
@@ -41,7 +88,7 @@ function resolveRequestFile(req) {
   return { kind: "path", filePath: target };
 }
 
-async function serveFile(filePath, res) {
+async function serveFile(filePath, req, res) {
   try {
     const stats = await fs.stat(filePath);
     if (stats.isDirectory()) {
@@ -64,8 +111,7 @@ async function serveFile(filePath, res) {
       "code" in error &&
       error.code === "ENOENT"
     ) {
-      res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ error: "NOT_FOUND" }));
+      await serveNotFound(req, res);
       return;
     }
     res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
@@ -89,11 +135,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (resolved.kind === "file") {
-    await serveFile(path.join(__dirname, resolved.file), res);
+    await serveFile(path.join(__dirname, resolved.file), req, res);
     return;
   }
 
-  await serveFile(resolved.filePath, res);
+  await serveFile(resolved.filePath, req, res);
 });
 
 server.listen(port, host, () => {

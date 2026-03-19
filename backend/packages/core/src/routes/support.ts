@@ -7,6 +7,7 @@ import {
   SUPPORT_TICKET_STATUSES,
   addSupportAdminReply,
   addSupportRequesterReply,
+  createOrAppendMessageReportTicket,
   createSupportTicket,
   getSupportAdminOverview,
   getSupportTicketForAdmin,
@@ -48,6 +49,38 @@ const requesterReplyBody = z.object({
   accessKey: z.string().trim().min(12).max(128),
   requesterName: optionalTrimmedString(120),
   message: z.string().trim().min(2).max(5000),
+});
+
+const reportAttachmentBody = z.object({
+  fileName: optionalTrimmedString(180),
+  contentType: optionalTrimmedString(120),
+  url: optionalTrimmedString(512),
+});
+
+const reportContextMessageBody = z.object({
+  messageId: optionalTrimmedString(96),
+  authorUserId: optionalTrimmedString(64),
+  authorName: optionalTrimmedString(120),
+  createdAt: optionalTrimmedString(96),
+  content: optionalTrimmedString(4000),
+  attachments: z.array(reportAttachmentBody).max(8).optional(),
+});
+
+const reportMessageBody = z.object({
+  reportedUserId: z.string().trim().min(3).max(64),
+  reportedUsername: optionalTrimmedString(64),
+  reportNote: optionalTrimmedString(2000),
+  source: z.object({
+    kind: z.enum(["server", "dm"]),
+    serverId: optionalTrimmedString(64),
+    serverName: optionalTrimmedString(120),
+    channelId: optionalTrimmedString(64),
+    channelName: optionalTrimmedString(120),
+    dmThreadId: optionalTrimmedString(64),
+    dmTitle: optionalTrimmedString(120),
+  }),
+  reportedMessage: reportContextMessageBody,
+  contextMessages: z.array(reportContextMessageBody).max(7).optional(),
 });
 
 const adminTicketListQuery = z.object({
@@ -126,6 +159,69 @@ export async function supportRoutes(app: FastifyInstance) {
     });
     if (!detail) return rep.code(404).send({ error: "SUPPORT_TICKET_NOT_FOUND" });
     return detail;
+  });
+
+  app.post("/v1/support/message-reports", { preHandler: [app.authenticate] } as any, async (req: any, rep) => {
+    const reporterUserId = String(req.user?.sub || "").trim();
+    if (!reporterUserId) return rep.code(401).send({ error: "UNAUTHORIZED" });
+
+    const body = parseBody(reportMessageBody, req.body);
+    if (body.reportedUserId === reporterUserId) {
+      return rep.code(400).send({ error: "CANNOT_REPORT_SELF" });
+    }
+    if (
+      body.reportedMessage.authorUserId &&
+      body.reportedMessage.authorUserId !== body.reportedUserId
+    ) {
+      return rep.code(400).send({ error: "REPORTED_MESSAGE_AUTHOR_MISMATCH" });
+    }
+
+    const reporterRows = await q<{
+      id: string;
+      email: string;
+      username: string;
+      display_name: string | null;
+    }>(
+      `SELECT id,email,username,display_name
+         FROM users
+        WHERE id=:userId
+        LIMIT 1`,
+      { userId: reporterUserId }
+    );
+    if (!reporterRows.length) return rep.code(401).send({ error: "ACCOUNT_NOT_FOUND" });
+
+    const targetRows = await q<{ id: string; username: string }>(
+      `SELECT id,username
+         FROM users
+        WHERE id=:userId
+        LIMIT 1`,
+      { userId: body.reportedUserId }
+    );
+    if (!targetRows.length) return rep.code(404).send({ error: "REPORTED_USER_NOT_FOUND" });
+
+    const reporter = reporterRows[0];
+    const target = targetRows[0];
+    const result = await createOrAppendMessageReportTicket({
+      reporterUserId: reporter.id,
+      reporterEmail: reporter.email,
+      reporterUsername: reporter.username,
+      reporterDisplayName: reporter.display_name || reporter.username,
+      reportedUserId: target.id,
+      reportedUsername: target.username,
+      reportNote: body.reportNote,
+      source: body.source,
+      reportedMessage: {
+        ...body.reportedMessage,
+        authorUserId: body.reportedMessage.authorUserId || target.id,
+        authorName:
+          body.reportedMessage.authorName ||
+          body.reportedUsername ||
+          target.username,
+      },
+      contextMessages: body.contextMessages,
+    });
+
+    return rep.code(result.mode === "created" ? 201 : 200).send(result);
   });
 
   app.get("/v1/admin/support/overview", { preHandler: [app.authenticate] } as any, async (req: any, rep) => {

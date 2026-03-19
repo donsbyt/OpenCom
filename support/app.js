@@ -312,8 +312,22 @@ function boot() {
   elements.loadRecentButton.addEventListener("click", handleLoadRecentTicket);
 
   const params = new URLSearchParams(window.location.search);
+  const queryCategory = trimValue(params.get("category"));
+  const queryUsername = trimValue(params.get("opencomUsername"));
+  const queryEmail = trimValue(params.get("contactEmail"));
   const queryReference = params.get("reference") || "";
   const queryAccessKey = params.get("accessKey") || "";
+
+  if (queryCategory && CATEGORY_OPTIONS.some(([value]) => value === queryCategory)) {
+    elements.createForm.elements.category.value = queryCategory;
+  }
+  if (queryUsername) {
+    elements.createForm.elements.opencomUsername.value = queryUsername;
+  }
+  if (queryEmail) {
+    elements.createForm.elements.contactEmail.value = queryEmail;
+  }
+
   if (queryReference && queryAccessKey) {
     elements.lookupReference.value = queryReference;
     elements.lookupAccessKey.value = queryAccessKey;

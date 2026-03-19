@@ -14,7 +14,7 @@ export function LandingPage({
   const featureCards = [
     {
       id: "01",
-      title: "Organized workspaces",
+      title: "Organized servers",
       copy: "Keep servers structured with channels that scale from private teams to active communities."
     },
     {
