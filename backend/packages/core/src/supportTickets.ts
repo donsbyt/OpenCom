@@ -430,11 +430,12 @@ async function getTicketRowById(ticketId: string) {
     `SELECT st.id, st.reference_code, st.requester_name, st.contact_email,
             st.opencom_user_id, st.opencom_username, st.subject, st.category,
             st.priority, st.status, st.assigned_to_user_id,
-            assigned.username AS assigned_to_username,
+            COALESCE(assigned_admin.username, assigned_user.username) AS assigned_to_username,
             st.created_at, st.updated_at, st.last_activity_at,
             st.last_public_reply_at, st.last_admin_reply_at, st.closed_at
        FROM support_tickets st
-       LEFT JOIN users assigned ON assigned.id=st.assigned_to_user_id
+       LEFT JOIN users assigned_user ON assigned_user.id=st.assigned_to_user_id
+       LEFT JOIN panel_admin_users assigned_admin ON assigned_admin.id=st.assigned_to_user_id
       WHERE st.id=:ticketId
       LIMIT 1`,
     { ticketId }
@@ -447,11 +448,12 @@ async function getSecureTicketRowByReference(reference: string) {
     `SELECT st.id, st.reference_code, st.access_key_hash, st.requester_name,
             st.contact_email, st.opencom_user_id, st.opencom_username, st.subject,
             st.category, st.priority, st.status, st.assigned_to_user_id,
-            assigned.username AS assigned_to_username,
+            COALESCE(assigned_admin.username, assigned_user.username) AS assigned_to_username,
             st.created_at, st.updated_at, st.last_activity_at,
             st.last_public_reply_at, st.last_admin_reply_at, st.closed_at
        FROM support_tickets st
-       LEFT JOIN users assigned ON assigned.id=st.assigned_to_user_id
+       LEFT JOIN users assigned_user ON assigned_user.id=st.assigned_to_user_id
+       LEFT JOIN panel_admin_users assigned_admin ON assigned_admin.id=st.assigned_to_user_id
       WHERE st.reference_code=:reference
       LIMIT 1`,
     { reference: normalizeReference(reference) }
@@ -824,11 +826,12 @@ export async function listSupportTicketsForAdmin(filters: {
     `SELECT st.id, st.reference_code, st.requester_name, st.contact_email,
             st.opencom_user_id, st.opencom_username, st.subject, st.category,
             st.priority, st.status, st.assigned_to_user_id,
-            assigned.username AS assigned_to_username,
+            COALESCE(assigned_admin.username, assigned_user.username) AS assigned_to_username,
             st.created_at, st.updated_at, st.last_activity_at,
             st.last_public_reply_at, st.last_admin_reply_at, st.closed_at
        FROM support_tickets st
-       LEFT JOIN users assigned ON assigned.id=st.assigned_to_user_id
+       LEFT JOIN users assigned_user ON assigned_user.id=st.assigned_to_user_id
+       LEFT JOIN panel_admin_users assigned_admin ON assigned_admin.id=st.assigned_to_user_id
        ${whereSql}
       ORDER BY
         CASE
@@ -866,8 +869,16 @@ export async function updateSupportTicketByAdmin(ticketId: string, input: {
 
   if (input.assignedToUserId) {
     const assigneeRows = await q<{ id: string }>(
-      `SELECT id FROM users WHERE id=:userId LIMIT 1`,
-      { userId: input.assignedToUserId }
+      `SELECT id
+         FROM users
+        WHERE id=:userId
+       UNION
+       SELECT id
+         FROM panel_admin_users
+        WHERE id=:userId
+          AND disabled_at IS NULL
+       LIMIT 1`,
+      { userId: input.assignedToUserId },
     );
     if (!assigneeRows.length) {
       throw new Error("ASSIGNEE_NOT_FOUND");
@@ -910,7 +921,7 @@ export async function updateSupportTicketByAdmin(ticketId: string, input: {
 
 export async function addSupportAdminReply(input: {
   ticketId: string;
-  actorUserId: string;
+  actorUserId?: string | null;
   actorUsername: string;
   message: string;
   isInternalNote?: boolean;
@@ -927,7 +938,7 @@ export async function addSupportAdminReply(input: {
   await appendTicketMessage({
     ticketId: input.ticketId,
     authorType: "staff",
-    authorUserId: input.actorUserId,
+    authorUserId: input.actorUserId || null,
     authorName: input.actorUsername,
     body: input.message.trim(),
     isInternalNote,

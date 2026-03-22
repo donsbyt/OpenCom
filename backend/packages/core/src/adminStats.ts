@@ -13,6 +13,7 @@ const repoRoot = path.resolve(__dirname, "../../../../../");
 const GLOBAL_SAMPLE_LIMIT = 2000;
 const ROUTE_SAMPLE_LIMIT = 300;
 const HEAVY_STATS_TTL_MS = 15_000;
+const USER_COUNT_OFFSET_FILE = path.join(os.homedir(), "user.txt");
 
 type RouteMetricState = {
   key: string;
@@ -291,6 +292,19 @@ async function countIfTableExists(tableName: string, sql?: string) {
   );
 }
 
+async function readUserCountOffset() {
+  try {
+    const raw = await fs.readFile(USER_COUNT_OFFSET_FILE, "utf8");
+    const trimmed = raw.trim();
+    if (!trimmed) return 0;
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.trunc(parsed);
+  } catch {
+    return 0;
+  }
+}
+
 async function collectDatabaseStats() {
   const [
     users,
@@ -314,6 +328,7 @@ async function collectDatabaseStats() {
     badgeDefinitions,
     supportTicketsTotal,
     supportTicketsOpen,
+    userCountOffset,
   ] = await Promise.all([
     countRows(`SELECT COUNT(*) AS count FROM users`, {}, { fallbackOnMissingTable: true }),
     countRows(`SELECT COUNT(*) AS count FROM account_bans`, {}, { fallbackOnMissingTable: true }),
@@ -375,10 +390,15 @@ async function collectDatabaseStats() {
        FROM support_tickets
        WHERE status IN ('open','waiting_on_staff','waiting_on_user')`,
     ),
+    readUserCountOffset(),
   ]);
 
+  const usersWithOffset = users + userCountOffset;
+
   return {
-    users,
+    users: usersWithOffset,
+    usersBase: users,
+    usersFileOffset: userCountOffset,
     bannedUsers,
     refreshSessions,
     activeRefreshSessions,

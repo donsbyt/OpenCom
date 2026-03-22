@@ -16,6 +16,7 @@ import {
   updateSupportTicketByAdmin,
 } from "../supportTickets.js";
 import { getPlatformAccess, requestHasPanelPassword } from "../platformStaff.js";
+import { requirePanelPermission } from "../panelAccess.js";
 import { q } from "../db.js";
 
 const optionalTrimmedString = (max: number) =>
@@ -126,12 +127,28 @@ async function requireSupportAccess(req: any) {
   throw new Error("FORBIDDEN");
 }
 
+async function requirePanelSupportAccess(req: any) {
+  await requirePanelPermission(req, "manage_support");
+}
+
 async function getActorUsername(userId: string) {
   const rows = await q<{ username: string }>(
     `SELECT username FROM users WHERE id=:userId LIMIT 1`,
     { userId }
   );
   return rows[0]?.username || "Support Agent";
+}
+
+async function getPanelActorUsername(adminId: string) {
+  const rows = await q<{ username: string }>(
+    `SELECT username
+       FROM panel_admin_users
+      WHERE id=:adminId
+        AND disabled_at IS NULL
+      LIMIT 1`,
+    { adminId },
+  );
+  return rows[0]?.username || "Panel Staff";
 }
 
 export async function supportRoutes(app: FastifyInstance) {
@@ -297,6 +314,104 @@ export async function supportRoutes(app: FastifyInstance) {
     const updated = await addSupportAdminReply({
       ticketId,
       actorUserId,
+      actorUsername,
+      message: body.message,
+      isInternalNote: body.isInternalNote,
+      nextStatus: body.nextStatus,
+    });
+
+    if (!updated) return rep.code(404).send({ error: "SUPPORT_TICKET_NOT_FOUND" });
+    return updated;
+  });
+
+  app.get("/v1/panel/support/overview", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelSupportAccess(req);
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    return getSupportAdminOverview();
+  });
+
+  app.get("/v1/panel/support/tickets", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelSupportAccess(req);
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const parsed = adminTicketListQuery.parse(req.query);
+    const actorAdminId = String(req.panelAdmin?.id || req.user?.sub || "").trim();
+    const filters = {
+      ...parsed,
+      assignedToUserId:
+        parsed.assignedToUserId === "__me__" && actorAdminId
+          ? actorAdminId
+          : parsed.assignedToUserId,
+    };
+    return {
+      tickets: await listSupportTicketsForAdmin(filters),
+    };
+  });
+
+  app.get("/v1/panel/support/tickets/:ticketId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelSupportAccess(req);
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const { ticketId } = z.object({ ticketId: z.string().min(3) }).parse(req.params);
+    const detail = await getSupportTicketForAdmin(ticketId);
+    if (!detail) return rep.code(404).send({ error: "SUPPORT_TICKET_NOT_FOUND" });
+    return detail;
+  });
+
+  app.put("/v1/panel/support/tickets/:ticketId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelSupportAccess(req);
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const { ticketId } = z.object({ ticketId: z.string().min(3) }).parse(req.params);
+    const body = parseBody(adminTicketUpdateBody, req.body);
+    const actorAdminId = String(req.panelAdmin?.id || req.user?.sub || "").trim();
+
+    try {
+      const updated = await updateSupportTicketByAdmin(ticketId, {
+        ...body,
+        assignedToUserId:
+          body.assignedToUserId === "__me__" && actorAdminId
+            ? actorAdminId
+            : body.assignedToUserId,
+      });
+      if (!updated) return rep.code(404).send({ error: "SUPPORT_TICKET_NOT_FOUND" });
+      return updated;
+    } catch (error) {
+      if ((error as Error)?.message === "ASSIGNEE_NOT_FOUND") {
+        return rep.code(404).send({ error: "ASSIGNEE_NOT_FOUND" });
+      }
+      throw error;
+    }
+  });
+
+  app.post("/v1/panel/support/tickets/:ticketId/reply", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelSupportAccess(req);
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const { ticketId } = z.object({ ticketId: z.string().min(3) }).parse(req.params);
+    const body = parseBody(adminReplyBody, req.body);
+    const actorAdminId = String(req.panelAdmin?.id || req.user?.sub || "").trim();
+    const actorUsername = await getPanelActorUsername(actorAdminId);
+
+    const updated = await addSupportAdminReply({
+      ticketId,
+      actorUserId: null,
       actorUsername,
       message: body.message,
       isInternalNote: body.isInternalNote,

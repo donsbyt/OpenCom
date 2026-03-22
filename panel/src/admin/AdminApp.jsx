@@ -114,6 +114,47 @@ const STAFF_TEMPLATES = [
   },
 ];
 
+const SUPPORT_STATUS_OPTIONS = [
+  { id: "open", label: "Open" },
+  { id: "waiting_on_staff", label: "Waiting on staff" },
+  { id: "waiting_on_user", label: "Waiting on user" },
+  { id: "resolved", label: "Resolved" },
+  { id: "closed", label: "Closed" },
+];
+
+const SUPPORT_CATEGORY_OPTIONS = [
+  { id: "unban_appeal", label: "Unban appeal" },
+  { id: "account_help", label: "Account help" },
+  { id: "billing", label: "Billing" },
+  { id: "bug_report", label: "Bug report" },
+  { id: "feature_request", label: "Feature request" },
+  { id: "message_report", label: "Message report" },
+  { id: "safety", label: "Safety" },
+  { id: "other", label: "Other" },
+];
+
+const SUPPORT_PRIORITY_OPTIONS = [
+  { id: "low", label: "Low" },
+  { id: "normal", label: "Normal" },
+  { id: "high", label: "High" },
+  { id: "urgent", label: "Urgent" },
+];
+
+const STAFF_SCHEDULE_TYPES = [
+  { id: "support", label: "Support queue" },
+  { id: "moderation", label: "Moderation" },
+  { id: "operations", label: "Operations" },
+  { id: "content", label: "Content" },
+  { id: "on_call", label: "On-call" },
+  { id: "custom", label: "Custom" },
+];
+
+function defaultPanelAccountTitle(role = "staff") {
+  if (role === "owner") return "Owner";
+  if (role === "admin") return "Admin";
+  return "Staff";
+}
+
 const EMPTY_BLOG_DRAFT = {
   id: "",
   title: "",
@@ -235,6 +276,28 @@ function formatAdminDurationMs(value = 0) {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function formatSupportStatus(value = "") {
+  return SUPPORT_STATUS_OPTIONS.find((option) => option.id === value)?.label || value || "Unknown";
+}
+
+function formatSupportCategory(value = "") {
+  return SUPPORT_CATEGORY_OPTIONS.find((option) => option.id === value)?.label || value || "Other";
+}
+
+function formatSupportPriority(value = "") {
+  return SUPPORT_PRIORITY_OPTIONS.find((option) => option.id === value)?.label || value || "Normal";
+}
+
+function todayDateValue() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function addDaysDateValue(days = 0) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 async function api(path, token, panelPassword, options = {}) {
   const hasBody = options.body !== undefined && options.body !== null;
   const hasFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
@@ -352,6 +415,62 @@ export function AdminApp() {
   const [staffTitle, setStaffTitle] = useState("Moderator");
   const [staffNotes, setStaffNotes] = useState("");
   const [staffPermissions, setStaffPermissions] = useState(["moderate_users"]);
+  const [panelAccounts, setPanelAccounts] = useState([]);
+  const [panelAccountsLoading, setPanelAccountsLoading] = useState(false);
+  const [schedules, setSchedules] = useState([]);
+  const [schedulesLoading, setSchedulesLoading] = useState(false);
+  const [schedulesBusy, setSchedulesBusy] = useState(false);
+  const [scheduleStartDate, setScheduleStartDate] = useState(todayDateValue());
+  const [scheduleEndDate, setScheduleEndDate] = useState(addDaysDateValue(13));
+  const [scheduleFilterAdminId, setScheduleFilterAdminId] = useState("");
+  const [scheduleDraft, setScheduleDraft] = useState({
+    id: "",
+    adminId: "",
+    shiftDate: todayDateValue(),
+    startTime: "09:00",
+    endTime: "17:00",
+    timezone: "UTC",
+    shiftType: "support",
+    note: "",
+  });
+  const [supportOverview, setSupportOverview] = useState(null);
+  const [supportTickets, setSupportTickets] = useState([]);
+  const [supportLoading, setSupportLoading] = useState(false);
+  const [supportDetailLoading, setSupportDetailLoading] = useState(false);
+  const [supportBusy, setSupportBusy] = useState(false);
+  const [supportFilters, setSupportFilters] = useState({
+    status: "",
+    category: "",
+    priority: "",
+    assignedToUserId: "",
+    query: "",
+  });
+  const [selectedSupportTicketId, setSelectedSupportTicketId] = useState("");
+  const [supportDetail, setSupportDetail] = useState(null);
+  const [supportUpdateDraft, setSupportUpdateDraft] = useState({
+    subject: "",
+    category: "",
+    priority: "",
+    status: "",
+    assignedToUserId: "",
+  });
+  const [supportReplyMessage, setSupportReplyMessage] = useState("");
+  const [supportReplyInternal, setSupportReplyInternal] = useState(false);
+  const [supportReplyNextStatus, setSupportReplyNextStatus] = useState("");
+  const [shellSearch, setShellSearch] = useState("");
+  const [panelAccountBusy, setPanelAccountBusy] = useState(false);
+  const [panelAccountDraft, setPanelAccountDraft] = useState({
+    id: "",
+    email: "",
+    username: "",
+    password: "",
+    role: "staff",
+    title: "Staff",
+    permissions: ["manage_support"],
+    notes: "",
+    disabled: false,
+  });
+  const [panelAccountPasswordDraft, setPanelAccountPasswordDraft] = useState("");
   const [blogPosts, setBlogPosts] = useState([]);
   const [blogLoading, setBlogLoading] = useState(false);
   const [blogBusy, setBlogBusy] = useState(false);
@@ -410,6 +529,10 @@ export function AdminApp() {
     adminStatus?.isPlatformAdmin === true ||
     adminStatus?.isPlatformOwner === true ||
     panelPermissions.includes("send_official_messages");
+  const canManageSupport =
+    adminStatus?.isPlatformAdmin === true ||
+    adminStatus?.isPlatformOwner === true ||
+    panelPermissions.includes("manage_support");
   const canManageBlogs =
     adminStatus?.isPlatformAdmin === true ||
     adminStatus?.isPlatformOwner === true ||
@@ -417,6 +540,15 @@ export function AdminApp() {
   const canManageOperations =
     adminStatus?.isPlatformAdmin === true ||
     adminStatus?.isPlatformOwner === true;
+  const isStaffAccountsTab = tab === "staff-accounts";
+  const isStaffPermissionsTab = tab === "staff-permissions";
+  const isStaffSchedulingTab = tab === "staff-scheduling";
+  const isStaffSupportTab = tab === "staff-support";
+  const isAnyStaffTab =
+    isStaffAccountsTab ||
+    isStaffPermissionsTab ||
+    isStaffSchedulingTab ||
+    isStaffSupportTab;
 
   useEffect(() => {
     if (!isPanelUnlocked || !token) return;
@@ -436,8 +568,22 @@ export function AdminApp() {
     if (tab === "boost" && canManageBoosts) {
       loadBoostTrialWindow();
     }
-    if (tab === "staff" && canManageStaff) {
+    if (isStaffAccountsTab && canManageStaff) {
+      loadPanelAccounts();
       loadStaffAssignments();
+    }
+    if (isStaffPermissionsTab && canManageStaff) {
+      loadPanelAccounts();
+      loadStaffAssignments();
+    }
+    if (isStaffSchedulingTab && canManageSupport) {
+      loadPanelAccounts();
+      loadStaffSchedules();
+    }
+    if (isStaffSupportTab && canManageSupport) {
+      loadPanelAccounts();
+      loadSupportOverview();
+      loadSupportTickets();
     }
     if (tab === "badges" && canManageBadges) {
       loadBadgeDefinitions();
@@ -452,7 +598,12 @@ export function AdminApp() {
     tab,
     token,
     isPanelUnlocked,
+    isStaffAccountsTab,
+    isStaffPermissionsTab,
+    isStaffSchedulingTab,
+    isStaffSupportTab,
     canManageStaff,
+    canManageSupport,
     canManageBadges,
     canManageBoosts,
     canSendOfficialMessages,
@@ -486,6 +637,16 @@ export function AdminApp() {
       history: [],
     });
     setOperationBusy("");
+    setPanelAccounts([]);
+    setStaffAssignments([]);
+    setSchedules([]);
+    setSupportOverview(null);
+    setSupportTickets([]);
+    setSupportDetail(null);
+    setSelectedSupportTicketId("");
+    setShellSearch("");
+    setPanelAccountBusy(false);
+    resetPanelAccountDraft();
   }
 
   async function refreshPanelSession() {
@@ -644,7 +805,7 @@ export function AdminApp() {
       // best effort logout
     }
     clearPanelSession();
-    showStatus("Signed out from admin panel.", "info");
+    showStatus("Signed out from the staff panel.", "info");
   }
 
   async function loadOverview({ showSuccess = false } = {}) {
@@ -760,6 +921,220 @@ export function AdminApp() {
     }
   }
 
+  async function loadPanelAccounts() {
+    setPanelAccountsLoading(true);
+    try {
+      const query = canManageStaff ? "?includeDisabled=1" : "";
+      const data = await api(`/v1/admin/panel-accounts${query}`, token, panelPassword);
+      const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+      setPanelAccounts(accounts);
+      setStaffUserId((current) => {
+        if (current && accounts.some((account) => account.id === current)) return current;
+        const firstStaff = accounts.find((account) => account.role === "staff" && !account.disabledAt);
+        return firstStaff?.id || accounts[0]?.id || "";
+      });
+      setPanelAccountDraft((current) => {
+        if (current.id && accounts.some((account) => account.id === current.id)) {
+          return current;
+        }
+        return {
+          id: "",
+          email: "",
+          username: "",
+          password: "",
+          role: "staff",
+          title: "Staff",
+          permissions: ["manage_support"],
+          notes: "",
+          disabled: false,
+        };
+      });
+      setScheduleDraft((current) => {
+        if (current.adminId && accounts.some((account) => account.id === current.adminId)) {
+          return current;
+        }
+        const firstStaff = accounts.find((account) => account.role === "staff" && !account.disabledAt);
+        return {
+          ...current,
+          adminId: firstStaff?.id || accounts[0]?.id || "",
+        };
+      });
+    } catch (e) {
+      setPanelAccounts([]);
+      showStatus(`Panel account list failed: ${e.message}`, "error");
+    } finally {
+      setPanelAccountsLoading(false);
+    }
+  }
+
+  function resetPanelAccountDraft() {
+    setPanelAccountDraft({
+      id: "",
+      email: "",
+      username: "",
+      password: "",
+      role: "staff",
+      title: "Staff",
+      permissions: ["manage_support"],
+      notes: "",
+      disabled: false,
+    });
+    setPanelAccountPasswordDraft("");
+  }
+
+  function openPanelAccountDraft(account) {
+    if (!account?.id) {
+      resetPanelAccountDraft();
+      return;
+    }
+    setPanelAccountDraft({
+      id: account.id,
+      email: account.email || "",
+      username: account.username || "",
+      password: "",
+      role: account.role || "staff",
+      title: account.title || defaultPanelAccountTitle(account.role || "staff"),
+      permissions: Array.isArray(account.permissions) ? account.permissions : [],
+      notes: account.notes || "",
+      disabled: !!account.disabledAt,
+    });
+    setPanelAccountPasswordDraft("");
+  }
+
+  function togglePanelAccountPermission(permissionId) {
+    setPanelAccountDraft((current) => {
+      if (current.role !== "staff") {
+        return {
+          ...current,
+          permissions: [...PANEL_PERMISSION_OPTIONS.map((permission) => permission.id)],
+        };
+      }
+      if (current.permissions.includes(permissionId)) {
+        return {
+          ...current,
+          permissions: current.permissions.filter((value) => value !== permissionId),
+        };
+      }
+      return {
+        ...current,
+        permissions: [...current.permissions, permissionId],
+      };
+    });
+  }
+
+  function updatePanelAccountRole(role) {
+    setPanelAccountDraft((current) => ({
+      ...current,
+      role,
+      title: current.title || defaultPanelAccountTitle(role),
+      permissions:
+        role === "staff"
+          ? current.permissions.length
+            ? current.permissions
+            : ["manage_support"]
+          : [...PANEL_PERMISSION_OPTIONS.map((permission) => permission.id)],
+    }));
+  }
+
+  async function savePanelAccount() {
+    if (!panelAccountDraft.email.trim()) {
+      showStatus("Panel account email is required.", "info");
+      return;
+    }
+    if (!panelAccountDraft.username.trim()) {
+      showStatus("Panel account username is required.", "info");
+      return;
+    }
+    if (!panelAccountDraft.id && !panelAccountDraft.password.trim()) {
+      showStatus("Set an initial password for the new panel account.", "info");
+      return;
+    }
+    if (panelAccountDraft.role === "staff" && panelAccountDraft.permissions.length === 0) {
+      showStatus("Choose at least one permission for a staff account.", "info");
+      return;
+    }
+    if (!isOwner && panelAccountDraft.role !== "staff") {
+      showStatus("Only owner accounts can create or edit admin/owner panel roles.", "info");
+      return;
+    }
+
+    setPanelAccountBusy(true);
+    try {
+      if (panelAccountDraft.id) {
+        await api(`/v1/admin/panel-accounts/${encodeURIComponent(panelAccountDraft.id)}`, token, panelPassword, {
+          method: "PATCH",
+          body: JSON.stringify({
+            email: panelAccountDraft.email.trim(),
+            username: panelAccountDraft.username.trim(),
+            role: panelAccountDraft.role,
+            title: panelAccountDraft.title.trim() || defaultPanelAccountTitle(panelAccountDraft.role),
+            permissions: panelAccountDraft.role === "staff" ? panelAccountDraft.permissions : undefined,
+            notes: panelAccountDraft.notes.trim() || null,
+            disabled: panelAccountDraft.disabled,
+          }),
+        });
+        showStatus("Panel account updated.", "success");
+      } else {
+        await api("/v1/admin/panel-accounts", token, panelPassword, {
+          method: "POST",
+          body: JSON.stringify({
+            email: panelAccountDraft.email.trim(),
+            username: panelAccountDraft.username.trim(),
+            password: panelAccountDraft.password,
+            role: panelAccountDraft.role,
+            title: panelAccountDraft.title.trim() || defaultPanelAccountTitle(panelAccountDraft.role),
+            permissions: panelAccountDraft.role === "staff" ? panelAccountDraft.permissions : undefined,
+            notes: panelAccountDraft.notes.trim() || undefined,
+          }),
+        });
+        showStatus("Panel account created.", "success");
+      }
+      await loadPanelAccounts();
+      await loadStaffAssignments();
+      await loadOverview();
+      if (!panelAccountDraft.id) resetPanelAccountDraft();
+    } catch (e) {
+      showStatus(e.message || "Failed to save panel account.", "error");
+    } finally {
+      setPanelAccountBusy(false);
+    }
+  }
+
+  async function resetPanelAccountPassword() {
+    if (!panelAccountDraft.id) {
+      showStatus("Select an existing panel account first.", "info");
+      return;
+    }
+    if (!panelAccountPasswordDraft.trim()) {
+      showStatus("Enter a new password first.", "info");
+      return;
+    }
+    if (!isOwner && panelAccountDraft.role !== "staff") {
+      showStatus("Only owner accounts can reset admin/owner passwords.", "info");
+      return;
+    }
+    const confirmed = window.confirm("Reset this panel account password and force 2FA setup on next login?");
+    if (!confirmed) return;
+
+    setPanelAccountBusy(true);
+    try {
+      await api(`/v1/admin/panel-accounts/${encodeURIComponent(panelAccountDraft.id)}/password`, token, panelPassword, {
+        method: "POST",
+        body: JSON.stringify({
+          password: panelAccountPasswordDraft,
+          revokeSessions: true,
+        }),
+      });
+      setPanelAccountPasswordDraft("");
+      showStatus("Panel account password reset.", "success");
+      await loadPanelAccounts();
+    } catch (e) {
+      showStatus(e.message || "Failed to reset panel account password.", "error");
+    } finally {
+      setPanelAccountBusy(false);
+    }
+  }
+
   async function loadStaffAssignments() {
     setStaffLoading(true);
     try {
@@ -773,6 +1148,259 @@ export function AdminApp() {
     }
   }
 
+  async function loadStaffSchedules({ showSuccess = false } = {}) {
+    if (!canManageSupport) return;
+    setSchedulesLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (scheduleStartDate) params.set("startDate", scheduleStartDate);
+      if (scheduleEndDate) params.set("endDate", scheduleEndDate);
+      if (scheduleFilterAdminId) params.set("adminId", scheduleFilterAdminId);
+      const query = params.toString() ? `?${params.toString()}` : "";
+      const data = await api(`/v1/admin/staff/schedules${query}`, token, panelPassword);
+      setSchedules(Array.isArray(data?.schedules) ? data.schedules : []);
+      if (showSuccess) showStatus("Schedule refreshed.", "success");
+    } catch (e) {
+      setSchedules([]);
+      showStatus(e.message || "Failed to load staff schedules.", "error");
+    } finally {
+      setSchedulesLoading(false);
+    }
+  }
+
+  function resetScheduleDraft() {
+    setScheduleDraft((current) => ({
+      id: "",
+      adminId: current.adminId || staffUserId || "",
+      shiftDate: todayDateValue(),
+      startTime: "09:00",
+      endTime: "17:00",
+      timezone: current.timezone || "UTC",
+      shiftType: "support",
+      note: "",
+    }));
+  }
+
+  function editSchedule(entry) {
+    setScheduleDraft({
+      id: entry.id || "",
+      adminId: entry.adminId || "",
+      shiftDate: entry.shiftDate || todayDateValue(),
+      startTime: entry.startTime || "09:00",
+      endTime: entry.endTime || "17:00",
+      timezone: entry.timezone || "UTC",
+      shiftType: entry.shiftType || "support",
+      note: entry.note || "",
+    });
+    setTab("staff-scheduling");
+  }
+
+  async function saveSchedule() {
+    if (!scheduleDraft.adminId.trim()) {
+      showStatus("Choose a panel staff account for this shift.", "info");
+      return;
+    }
+    if (!scheduleDraft.shiftDate || !scheduleDraft.startTime || !scheduleDraft.endTime) {
+      showStatus("Shift date, start time, and end time are required.", "info");
+      return;
+    }
+    if (scheduleDraft.startTime >= scheduleDraft.endTime) {
+      showStatus("Shift end time must be after start time.", "info");
+      return;
+    }
+
+    setSchedulesBusy(true);
+    try {
+      const payload = {
+        adminId: scheduleDraft.adminId.trim(),
+        shiftDate: scheduleDraft.shiftDate,
+        startTime: scheduleDraft.startTime,
+        endTime: scheduleDraft.endTime,
+        timezone: scheduleDraft.timezone.trim() || "UTC",
+        shiftType: scheduleDraft.shiftType.trim() || "support",
+        note: scheduleDraft.note.trim() || undefined,
+      };
+      if (scheduleDraft.id) {
+        await api(`/v1/admin/staff/schedules/${encodeURIComponent(scheduleDraft.id)}`, token, panelPassword, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        showStatus("Shift updated.", "success");
+      } else {
+        await api("/v1/admin/staff/schedules", token, panelPassword, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        showStatus("Shift scheduled.", "success");
+      }
+      await loadStaffSchedules();
+      resetScheduleDraft();
+    } catch (e) {
+      showStatus(e.message || "Failed to save schedule.", "error");
+    } finally {
+      setSchedulesBusy(false);
+    }
+  }
+
+  async function deleteSchedule(scheduleId = scheduleDraft.id) {
+    const targetId = String(scheduleId || "").trim();
+    if (!targetId) {
+      showStatus("Select a shift to remove.", "info");
+      return;
+    }
+    const confirmed = window.confirm("Remove this schedule entry?");
+    if (!confirmed) return;
+
+    setSchedulesBusy(true);
+    try {
+      await api(`/v1/admin/staff/schedules/${encodeURIComponent(targetId)}`, token, panelPassword, {
+        method: "DELETE",
+      });
+      if (scheduleDraft.id === targetId) {
+        resetScheduleDraft();
+      }
+      await loadStaffSchedules();
+      showStatus("Shift removed.", "success");
+    } catch (e) {
+      showStatus(e.message || "Failed to remove schedule.", "error");
+    } finally {
+      setSchedulesBusy(false);
+    }
+  }
+
+  async function loadSupportOverview() {
+    if (!canManageSupport) return;
+    try {
+      const data = await api("/v1/panel/support/overview", token, panelPassword);
+      setSupportOverview(data || null);
+    } catch (e) {
+      setSupportOverview(null);
+      showStatus(`Support overview failed: ${e.message}`, "error");
+    }
+  }
+
+  async function loadSupportTickets({ showSuccess = false, overrideFilters = null } = {}) {
+    if (!canManageSupport) return;
+    setSupportLoading(true);
+    try {
+      const effectiveFilters = overrideFilters || supportFilters;
+      const params = new URLSearchParams();
+      if (effectiveFilters.status) params.set("status", effectiveFilters.status);
+      if (effectiveFilters.category) params.set("category", effectiveFilters.category);
+      if (effectiveFilters.priority) params.set("priority", effectiveFilters.priority);
+      if (effectiveFilters.assignedToUserId) params.set("assignedToUserId", effectiveFilters.assignedToUserId);
+      if (String(effectiveFilters.query || "").trim()) params.set("query", String(effectiveFilters.query || "").trim());
+      params.set("limit", "80");
+      const data = await api(`/v1/panel/support/tickets?${params.toString()}`, token, panelPassword);
+      const tickets = Array.isArray(data?.tickets) ? data.tickets : [];
+      setSupportTickets(tickets);
+      if (selectedSupportTicketId && !tickets.some((ticket) => ticket.id === selectedSupportTicketId)) {
+        setSelectedSupportTicketId("");
+        setSupportDetail(null);
+      }
+      if (showSuccess) showStatus("Support queue refreshed.", "success");
+    } catch (e) {
+      setSupportTickets([]);
+      showStatus(e.message || "Failed to load support tickets.", "error");
+    } finally {
+      setSupportLoading(false);
+    }
+  }
+
+  async function openSupportTicket(ticketId) {
+    const resolvedTicketId = String(ticketId || "").trim();
+    if (!resolvedTicketId) return;
+
+    setSelectedSupportTicketId(resolvedTicketId);
+    setSupportDetailLoading(true);
+    try {
+      const detail = await api(`/v1/panel/support/tickets/${encodeURIComponent(resolvedTicketId)}`, token, panelPassword);
+      setSupportDetail(detail || null);
+      const ticket = detail?.ticket || {};
+      setSupportUpdateDraft({
+        subject: ticket.subject || "",
+        category: ticket.category || "other",
+        priority: ticket.priority || "normal",
+        status: ticket.status || "open",
+        assignedToUserId: ticket.assignedTo?.userId || "",
+      });
+      setSupportReplyMessage("");
+      setSupportReplyInternal(false);
+      setSupportReplyNextStatus("");
+    } catch (e) {
+      setSupportDetail(null);
+      showStatus(e.message || "Failed to load support ticket.", "error");
+    } finally {
+      setSupportDetailLoading(false);
+    }
+  }
+
+  async function saveSupportTicketUpdates() {
+    if (!selectedSupportTicketId || !supportDetail?.ticket?.id) {
+      showStatus("Choose a ticket before saving changes.", "info");
+      return;
+    }
+
+    setSupportBusy(true);
+    try {
+      await api(`/v1/panel/support/tickets/${encodeURIComponent(selectedSupportTicketId)}`, token, panelPassword, {
+        method: "PUT",
+        body: JSON.stringify({
+          subject: supportUpdateDraft.subject.trim() || undefined,
+          category: supportUpdateDraft.category || undefined,
+          priority: supportUpdateDraft.priority || undefined,
+          status: supportUpdateDraft.status || undefined,
+          assignedToUserId:
+            supportUpdateDraft.assignedToUserId === "__unassigned__"
+              ? null
+              : supportUpdateDraft.assignedToUserId || null,
+        }),
+      });
+      await Promise.all([
+        loadSupportOverview(),
+        loadSupportTickets(),
+      ]);
+      await openSupportTicket(selectedSupportTicketId);
+      showStatus("Support ticket updated.", "success");
+    } catch (e) {
+      showStatus(e.message || "Failed to update support ticket.", "error");
+    } finally {
+      setSupportBusy(false);
+    }
+  }
+
+  async function sendSupportReply() {
+    if (!selectedSupportTicketId || !supportReplyMessage.trim()) {
+      showStatus("Write a reply first.", "info");
+      return;
+    }
+
+    setSupportBusy(true);
+    try {
+      await api(`/v1/panel/support/tickets/${encodeURIComponent(selectedSupportTicketId)}/reply`, token, panelPassword, {
+        method: "POST",
+        body: JSON.stringify({
+          message: supportReplyMessage.trim(),
+          isInternalNote: supportReplyInternal,
+          nextStatus: supportReplyNextStatus || undefined,
+        }),
+      });
+      setSupportReplyMessage("");
+      setSupportReplyInternal(false);
+      setSupportReplyNextStatus("");
+      await Promise.all([
+        loadSupportOverview(),
+        loadSupportTickets(),
+      ]);
+      await openSupportTicket(selectedSupportTicketId);
+      showStatus("Reply sent.", "success");
+    } catch (e) {
+      showStatus(e.message || "Failed to send support reply.", "error");
+    } finally {
+      setSupportBusy(false);
+    }
+  }
+
   function applyStaffTemplate(template) {
     setStaffLevelKey(template.id);
     setStaffTitle(template.title);
@@ -780,12 +1408,15 @@ export function AdminApp() {
   }
 
   function editStaffAssignment(assignment) {
-    setStaffUserId(assignment.userId || "");
+    const targetAdminId = assignment.adminId || assignment.userId || "";
+    setStaffUserId(targetAdminId);
     setStaffLevelKey(assignment.levelKey || "custom");
     setStaffTitle(assignment.title || "Staff");
     setStaffNotes(assignment.notes || "");
     setStaffPermissions(Array.isArray(assignment.permissions) ? assignment.permissions : []);
-    setTab("staff");
+    const matchingAccount = panelAccounts.find((account) => account.id === targetAdminId);
+    if (matchingAccount) openPanelAccountDraft(matchingAccount);
+    setTab("staff-permissions");
   }
 
   function toggleStaffPermission(permissionId) {
@@ -799,7 +1430,7 @@ export function AdminApp() {
 
   async function saveStaffAssignment() {
     if (!staffUserId.trim()) {
-      showStatus("Enter a user ID to assign panel permissions.", "info");
+      showStatus("Choose an admin panel account first.", "info");
       return;
     }
     if (staffPermissions.length === 0) {
@@ -819,6 +1450,7 @@ export function AdminApp() {
         }),
       });
       await loadStaffAssignments();
+      await loadPanelAccounts();
       await loadAdminStatus();
       await loadOverview();
       showStatus("Staff assignment saved.", "success");
@@ -832,7 +1464,7 @@ export function AdminApp() {
   async function removeStaffAssignment(userId = staffUserId) {
     const targetUserId = String(userId || "").trim();
     if (!targetUserId) {
-      showStatus("Enter a user ID to remove.", "info");
+      showStatus("Choose an admin panel account first.", "info");
       return;
     }
     const confirmed = window.confirm("Remove this panel staff assignment?");
@@ -849,6 +1481,7 @@ export function AdminApp() {
         applyStaffTemplate(STAFF_TEMPLATES[0]);
       }
       await loadStaffAssignments();
+      await loadPanelAccounts();
       await loadAdminStatus();
       await loadOverview();
       showStatus("Staff assignment removed.", "success");
@@ -953,14 +1586,16 @@ export function AdminApp() {
     }
   }
 
-  async function searchUsers() {
-    if (!query.trim()) {
+  async function searchUsers(nextQuery = query) {
+    const resolvedQuery = String(nextQuery || "").trim();
+    if (!resolvedQuery) {
       showStatus("Enter a search term (username or email).", "info");
       return;
     }
+    if (resolvedQuery !== query) setQuery(resolvedQuery);
     setSearching(true);
     try {
-      const data = await api(`/v1/admin/users?query=${encodeURIComponent(query.trim())}`, token, panelPassword);
+      const data = await api(`/v1/admin/users?query=${encodeURIComponent(resolvedQuery)}`, token, panelPassword);
       setUsers((data.users || []).map((user) => ({ ...user, isBanned: user.isBanned === true || user.isBanned === 1 })));
       showStatus(`Found ${(data.users || []).length} users.`, "success");
     } catch (e) {
@@ -969,6 +1604,25 @@ export function AdminApp() {
     } finally {
       setSearching(false);
     }
+  }
+
+  async function runGlobalSearch() {
+    const value = shellSearch.trim();
+    if (!value) {
+      showStatus("Type something to search.", "info");
+      return;
+    }
+    if (tab === "users") {
+      await searchUsers(value);
+      return;
+    }
+    if (isStaffSupportTab && canManageSupport) {
+      const nextFilters = { ...supportFilters, query: value };
+      setSupportFilters(nextFilters);
+      await loadSupportTickets({ showSuccess: true, overrideFilters: nextFilters });
+      return;
+    }
+    showStatus("Search is currently wired for Users and Support queue tabs.", "info");
   }
 
   async function refreshUsersAfterAction() {
@@ -1455,15 +2109,28 @@ export function AdminApp() {
 
   const isOwner = adminStatus?.isPlatformOwner === true;
   const tabs = [
-    { id: "overview", label: "Dashboard" },
-    { id: "users", label: "Users & moderation" },
-    canManageStaff ? { id: "staff", label: "Staff & permissions" } : null,
-    canSendOfficialMessages ? { id: "official", label: "Official Messages" } : null,
-    canManageBadges ? { id: "badges", label: "Badges" } : null,
-    canManageBoosts ? { id: "boost", label: "Boost Grants" } : null,
-    canManageOperations ? { id: "operations", label: "Operations" } : null,
-    canManageBlogs ? { id: "blogs", label: "Blogs" } : null,
+    { id: "overview", label: "Dashboard", group: "Core" },
+    { id: "users", label: "Users & moderation", group: "Core" },
+    canManageStaff ? { id: "staff-accounts", label: "Panel accounts", group: "Staff" } : null,
+    canManageStaff ? { id: "staff-permissions", label: "Staff permissions", group: "Staff" } : null,
+    canManageSupport ? { id: "staff-scheduling", label: "Scheduling", group: "Staff" } : null,
+    canManageSupport ? { id: "staff-support", label: "Support queue", group: "Staff" } : null,
+    canSendOfficialMessages ? { id: "official", label: "Official messages", group: "Comms" } : null,
+    canManageBadges ? { id: "badges", label: "Badges", group: "Growth" } : null,
+    canManageBoosts ? { id: "boost", label: "Boost grants", group: "Growth" } : null,
+    canManageBlogs ? { id: "blogs", label: "Blogs", group: "Content" } : null,
+    canManageOperations ? { id: "operations", label: "Operations", group: "System" } : null,
   ].filter(Boolean);
+  const groupedTabs = tabs.reduce((acc, entry) => {
+    const group = entry.group || "Other";
+    const existing = acc.find((item) => item.group === group);
+    if (existing) {
+      existing.items.push(entry);
+    } else {
+      acc.push({ group, items: [entry] });
+    }
+    return acc;
+  }, []);
 
   useEffect(() => {
     if (!tabs.some((item) => item.id === tab)) {
@@ -1489,6 +2156,8 @@ export function AdminApp() {
   const badgePreview = getBadgePreview(badgeDraft);
   const loadedUserHasSelectedBadge =
     !!selectedBadgeId && inspectedBadges.some((badge) => badge.badge === selectedBadgeId);
+  const selectedPanelAccount =
+    panelAccounts.find((account) => account.id === panelAccountDraft.id) || null;
 
   const roleLabel =
     adminStatus?.platformRole === "owner"
@@ -1498,14 +2167,19 @@ export function AdminApp() {
         : adminStatus?.platformRole === "staff"
           ? "Staff"
           : "Viewer";
+  const shellSearchPlaceholder = isStaffSupportTab
+    ? "Search support tickets by reference, subject, user, or email..."
+    : tab === "users"
+      ? "Search users by username or email..."
+      : "Quick search";
 
   if (!isPanelUnlocked) {
     return (
       <div className="admin-unlock">
         <div className="admin-unlock-card">
-          <h1>OpenCom Control Panel</h1>
+          <h1>OpenCom Staff Panel</h1>
           <p className="admin-unlock-desc">
-            Sign in with your dedicated admin account.
+            Sign in with your dedicated panel-admin account.
           </p>
 
           {!setupState ? (
@@ -1608,38 +2282,71 @@ export function AdminApp() {
   }
 
   return (
-    <div className="admin-panel">
-      <div className="admin-toprail">
-        <header className="admin-header">
-          <div className="admin-header-copy">
-            <p className="admin-eyebrow">Platform control</p>
-            <h1>OpenCom Control Panel</h1>
+    <div className="admin-panel admin-redesign">
+      <aside className="admin-sidebar">
+        <div className="admin-sidebar-brand">
+          <span className="admin-sidebar-logo">OC</span>
+          <div>
+            <strong>OpenCom</strong>
+            <span>Staff Panel</span>
           </div>
-          <div className="admin-header-meta">
-            {adminStatus && (
-              <span className="admin-role-badge" title="Your platform role">
-                {roleLabel}
-              </span>
-            )}
-            <a href={SERVER_ADMIN_URL} target="_blank" rel="noopener noreferrer" className="admin-link-out">Server Admin →</a>
-            <button
-              type="button"
-              className="admin-lock-btn"
-              onClick={logoutPanel}
-            >
-              Sign out
+        </div>
+
+        <div className="admin-sidebar-user">
+          <strong>{adminStatus?.username || "Panel User"}</strong>
+          <span>{adminStatus?.email || "No email loaded"}</span>
+          <small>{roleLabel}</small>
+        </div>
+
+        <nav className="admin-sidebar-nav">
+          {groupedTabs.map((group) => (
+            <div key={group.group} className="admin-sidebar-group">
+              <p className="admin-sidebar-group-label">{group.group}</p>
+              {group.items.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className={tab === entry.id ? "active" : ""}
+                  onClick={() => setTab(entry.id)}
+                >
+                  {entry.label}
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        <div className="admin-sidebar-footer">
+          <a href={SERVER_ADMIN_URL} target="_blank" rel="noopener noreferrer" className="admin-link-out">
+            Open Server Admin
+          </a>
+          <button type="button" className="admin-lock-btn" onClick={logoutPanel}>
+            Sign out
+          </button>
+        </div>
+      </aside>
+
+      <div className="admin-workspace">
+        <header className="admin-workspace-topbar">
+          <div className="admin-workspace-search">
+            <input
+              placeholder={shellSearchPlaceholder}
+              value={shellSearch}
+              onChange={(e) => setShellSearch(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && runGlobalSearch()}
+            />
+            <button type="button" onClick={runGlobalSearch}>
+              Search
             </button>
+          </div>
+          <div className="admin-workspace-metrics">
+            <span>{adminOverview.supportTicketsOpen || 0} open tickets</span>
+            <span>{adminOverview.staffAssignmentsCount || 0} staff assignments</span>
+            <span>{adminOverview.activeBoostGrants || 0} active boosts</span>
           </div>
         </header>
 
-        <nav className="admin-tabs">
-          {tabs.map((t) => (
-            <button key={t.id} type="button" className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>{t.label}</button>
-          ))}
-        </nav>
-      </div>
-
-      <div className="admin-content">
+        <div className="admin-content">
         {freshRecoveryCodes.length > 0 && (
           <section className="admin-section">
             <div className="admin-card admin-card-accent">
@@ -1722,26 +2429,6 @@ export function AdminApp() {
                               {officialQueuedUsers.some((user) => user.id === u.id) ? "Queued" : "Queue"}
                             </button>
                           )}
-                          {canManageStaff && (
-                            <button
-                              type="button"
-                              className="btn-sm"
-                              onClick={() => {
-                                const assignment = staffAssignments.find((item) => item.userId === u.id);
-                                if (assignment) {
-                                  editStaffAssignment(assignment);
-                                } else {
-                                  setStaffUserId(u.id);
-                                  setStaffNotes("");
-                                  applyStaffTemplate(STAFF_TEMPLATES[0]);
-                                  setTab("staff");
-                                }
-                              }}
-                              disabled={userActionBusyId === u.id}
-                            >
-                              Staff
-                            </button>
-                          )}
                           {isOwner && <button type="button" className="btn-sm" onClick={() => setFounder(u.id)} disabled={userActionBusyId === u.id}>Set founder</button>}
                           {isOwner && <button type="button" className="btn-sm" onClick={() => setAdmin(u.id, true)} disabled={userActionBusyId === u.id}>Make admin</button>}
                           {isOwner && <button type="button" className="btn-sm danger" onClick={() => setAdmin(u.id, false)} disabled={userActionBusyId === u.id}>Remove admin</button>}
@@ -1769,109 +2456,706 @@ export function AdminApp() {
           </section>
         )}
 
-        {tab === "staff" && (
+        {isAnyStaffTab && (
           <section className="admin-section">
             <div className="admin-section-topline">
               <div>
-                <h2>Staff roles & panel permissions</h2>
-                <p className="admin-hint">Assign focused panel access without making someone a full platform admin.</p>
+                <h2>
+                  {isStaffAccountsTab
+                    ? "Panel accounts"
+                    : isStaffPermissionsTab
+                      ? "Staff permissions"
+                      : isStaffSchedulingTab
+                        ? "Scheduling"
+                        : "Support queue"}
+                </h2>
+                <p className="admin-hint">
+                  {isStaffAccountsTab
+                    ? "Create and manage dedicated panel accounts. These are separate from normal platform user accounts."
+                    : isStaffPermissionsTab
+                      ? "Define what each panel staff account can do with role templates and explicit permission sets."
+                      : isStaffSchedulingTab
+                        ? "Plan shift coverage across support, moderation, operations, and on-call windows."
+                        : "Work support tickets with focused filters, assignment controls, and threaded replies."}
+                </p>
+              </div>
+              <div className="admin-badge-actions">
+                <button
+                  type="button"
+                  className="btn-sm"
+                  onClick={() => {
+                    if (isStaffAccountsTab || isStaffPermissionsTab) {
+                      loadPanelAccounts();
+                      loadStaffAssignments();
+                      return;
+                    }
+                    if (isStaffSchedulingTab) {
+                      loadPanelAccounts();
+                      loadStaffSchedules({ showSuccess: true });
+                      return;
+                    }
+                    if (isStaffSupportTab) {
+                      loadPanelAccounts();
+                      loadSupportOverview();
+                      loadSupportTickets({ showSuccess: true });
+                    }
+                  }}
+                  disabled={
+                    (isStaffAccountsTab || isStaffPermissionsTab)
+                      ? panelAccountsLoading || staffLoading
+                      : isStaffSchedulingTab
+                        ? panelAccountsLoading || schedulesLoading
+                        : panelAccountsLoading || supportLoading
+                  }
+                >
+                  {(isStaffAccountsTab || isStaffPermissionsTab)
+                    ? panelAccountsLoading || staffLoading
+                      ? "Refreshing…"
+                      : "Refresh staff data"
+                    : isStaffSchedulingTab
+                      ? schedulesLoading
+                        ? "Refreshing…"
+                        : "Refresh schedules"
+                      : supportLoading
+                        ? "Refreshing…"
+                        : "Refresh support queue"}
+                </button>
               </div>
             </div>
 
-            <div className="admin-cards">
-              <div className="admin-card">
-                <h3>Active assignments</h3>
-                <p><strong>{staffAssignments.length}</strong> staff member(s)</p>
-                <p className="text-dim">Owners and platform admins already have full access and do not need a staff assignment.</p>
-              </div>
-              <div className="admin-card">
-                <h3>Quick templates</h3>
-                <div className="admin-template-grid">
-                  {STAFF_TEMPLATES.map((template) => (
-                    <button
-                      key={template.id}
-                      type="button"
-                      className="admin-template-btn"
-                      onClick={() => applyStaffTemplate(template)}
-                    >
-                      <strong>{template.title}</strong>
-                      <span>{template.permissions.join(", ")}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="admin-official-grid">
-              <div className="admin-card">
-                <h3>Edit assignment</h3>
-                <div className="admin-user-pick-row">
-                  <input placeholder="User ID" value={staffUserId} onChange={(e) => setStaffUserId(e.target.value)} />
-                  <button type="button" className="btn-sm" onClick={loadStaffAssignments} disabled={staffLoading}>
-                    {staffLoading ? "Refreshing…" : "Refresh list"}
-                  </button>
-                </div>
-
-                <div className="admin-badge-form">
-                  <input placeholder="Level key" value={staffLevelKey} onChange={(e) => setStaffLevelKey(e.target.value)} />
-                  <input placeholder="Display title" value={staffTitle} onChange={(e) => setStaffTitle(e.target.value)} />
-                </div>
-
-                <textarea
-                  className="admin-official-textarea"
-                  placeholder="Internal notes for this staff assignment"
-                  value={staffNotes}
-                  onChange={(e) => setStaffNotes(e.target.value)}
-                />
-
-                <div className="admin-permission-grid">
-                  {PANEL_PERMISSION_OPTIONS.map((permission) => (
-                    <label key={permission.id} className="admin-permission-card">
-                      <input
-                        type="checkbox"
-                        checked={staffPermissions.includes(permission.id)}
-                        onChange={() => toggleStaffPermission(permission.id)}
-                      />
-                      <strong>{permission.label}</strong>
-                      <span>{permission.description}</span>
-                    </label>
-                  ))}
-                </div>
-
-                <div className="admin-badge-actions">
-                  <button type="button" onClick={saveStaffAssignment} disabled={staffBusy}>
-                    {staffBusy ? "Saving…" : "Save assignment"}
-                  </button>
-                  <button type="button" className="danger" onClick={() => removeStaffAssignment()} disabled={staffBusy}>
-                    Remove assignment
-                  </button>
-                </div>
-              </div>
-
-              <div className="admin-card">
-                <h3>Current team</h3>
-                {staffLoading ? (
-                  <p className="text-dim">Loading staff assignments…</p>
-                ) : staffAssignments.length === 0 ? (
-                  <p className="text-dim">No panel staff assigned yet.</p>
-                ) : (
-                  <div className="admin-staff-list">
-                    {staffAssignments.map((assignment) => (
-                      <button
-                        key={assignment.userId}
-                        type="button"
-                        className="admin-staff-row"
-                        onClick={() => editStaffAssignment(assignment)}
-                      >
-                        <strong>{assignment.username}</strong>
-                        <span>{assignment.title}</span>
-                        <small>{assignment.permissions.join(", ")}</small>
-                      </button>
-                    ))}
+            {(isStaffAccountsTab || isStaffPermissionsTab) && canManageStaff && (
+              <>
+                <div className="admin-cards">
+                  <div className="admin-card">
+                    <h3>Panel accounts</h3>
+                    <p><strong>{panelAccounts.length}</strong> account(s)</p>
+                    <p className="text-dim">Assignments here apply only to dedicated panel-admin accounts.</p>
                   </div>
-                )}
+                  {isStaffPermissionsTab && (
+                    <div className="admin-card">
+                      <h3>Active staff assignments</h3>
+                      <p><strong>{staffAssignments.length}</strong> staff account(s)</p>
+                      <p className="text-dim">Owners/admins always keep full access and are not edited here.</p>
+                    </div>
+                  )}
+                  {isStaffPermissionsTab ? (
+                    <div className="admin-card">
+                      <h3>Quick templates</h3>
+                      <div className="admin-template-grid">
+                        {STAFF_TEMPLATES.map((template) => (
+                          <button
+                            key={template.id}
+                            type="button"
+                            className="admin-template-btn"
+                            onClick={() => applyStaffTemplate(template)}
+                          >
+                            <strong>{template.title}</strong>
+                            <span>{template.permissions.join(", ")}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="admin-card">
+                      <h3>Account security</h3>
+                      <p>
+                        <strong>
+                          {panelAccounts.filter((account) => !account.twoFactorEnabled && !account.disabledAt).length}
+                        </strong>{" "}
+                        account(s) need 2FA setup
+                      </p>
+                      <p className="text-dim">
+                        Accounts without active 2FA cannot safely handle support or moderation workflows.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="admin-official-grid">
+                  {isStaffAccountsTab && (
+                    <div className="admin-card">
+                      <h3>{panelAccountDraft.id ? "Edit panel account" : "Create panel account"}</h3>
+                      <div className="admin-badge-form">
+                        <input
+                          type="email"
+                          placeholder="Admin email"
+                          value={panelAccountDraft.email}
+                          onChange={(e) => setPanelAccountDraft((current) => ({ ...current, email: e.target.value }))}
+                        />
+                        <input
+                          placeholder="Username"
+                          value={panelAccountDraft.username}
+                          onChange={(e) => setPanelAccountDraft((current) => ({ ...current, username: e.target.value }))}
+                        />
+                      </div>
+
+                      {!panelAccountDraft.id && (
+                        <input
+                          type="password"
+                          placeholder="Initial password"
+                          value={panelAccountDraft.password}
+                          onChange={(e) => setPanelAccountDraft((current) => ({ ...current, password: e.target.value }))}
+                        />
+                      )}
+
+                      <div className="admin-badge-form">
+                        <select
+                          value={panelAccountDraft.role}
+                          disabled={!isOwner && panelAccountDraft.role !== "staff"}
+                          onChange={(e) => updatePanelAccountRole(e.target.value)}
+                        >
+                          <option value="staff">Staff</option>
+                          <option value="admin" disabled={!isOwner}>Admin</option>
+                          <option value="owner" disabled={!isOwner}>Owner</option>
+                        </select>
+                        <input
+                          placeholder="Display title"
+                          value={panelAccountDraft.title}
+                          onChange={(e) => setPanelAccountDraft((current) => ({ ...current, title: e.target.value }))}
+                        />
+                      </div>
+
+                      <textarea
+                        className="admin-official-textarea"
+                        placeholder="Internal notes"
+                        value={panelAccountDraft.notes}
+                        onChange={(e) => setPanelAccountDraft((current) => ({ ...current, notes: e.target.value }))}
+                      />
+
+                      <label className="admin-setting-check">
+                        <input
+                          type="checkbox"
+                          checked={panelAccountDraft.disabled}
+                          onChange={(e) => setPanelAccountDraft((current) => ({ ...current, disabled: e.target.checked }))}
+                          disabled={!panelAccountDraft.id}
+                        />
+                        <span>Disable this panel account</span>
+                      </label>
+
+                      <div className="admin-permission-grid">
+                        {PANEL_PERMISSION_OPTIONS.map((permission) => (
+                          <label key={`account-${permission.id}`} className="admin-permission-card">
+                            <input
+                              type="checkbox"
+                              checked={
+                                panelAccountDraft.role === "staff"
+                                  ? panelAccountDraft.permissions.includes(permission.id)
+                                  : true
+                              }
+                              onChange={() => togglePanelAccountPermission(permission.id)}
+                              disabled={panelAccountDraft.role !== "staff"}
+                            />
+                            <strong>{permission.label}</strong>
+                            <span>{permission.description}</span>
+                          </label>
+                        ))}
+                      </div>
+
+                      {selectedPanelAccount ? (
+                        <p className="text-dim">
+                          Last login: {selectedPanelAccount.lastLoginAt ? formatAdminDateTime(selectedPanelAccount.lastLoginAt) : "Never"} ·
+                          {" "}2FA: {selectedPanelAccount.twoFactorEnabled ? "enabled" : "pending setup"}
+                        </p>
+                      ) : null}
+
+                      <div className="admin-badge-actions">
+                        <button
+                          type="button"
+                          onClick={savePanelAccount}
+                          disabled={panelAccountBusy || (!isOwner && panelAccountDraft.role !== "staff")}
+                        >
+                          {panelAccountBusy ? "Saving…" : panelAccountDraft.id ? "Update account" : "Create account"}
+                        </button>
+                        <button type="button" className="btn-sm" onClick={resetPanelAccountDraft} disabled={panelAccountBusy}>
+                          New draft
+                        </button>
+                      </div>
+
+                      {panelAccountDraft.id && (
+                        <div className="admin-badge-form">
+                          <input
+                            type="password"
+                            placeholder="New password"
+                            value={panelAccountPasswordDraft}
+                            onChange={(e) => setPanelAccountPasswordDraft(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="btn-sm danger"
+                            onClick={resetPanelAccountPassword}
+                            disabled={panelAccountBusy}
+                          >
+                            Reset password
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {isStaffPermissionsTab && (
+                    <div className="admin-card">
+                    <h3>Edit panel-account assignment</h3>
+                    <div className="admin-user-pick-row">
+                      <select value={staffUserId} onChange={(e) => setStaffUserId(e.target.value)}>
+                        <option value="">Select panel account…</option>
+                        {panelAccounts
+                          .filter((account) => account.role === "staff" && !account.disabledAt)
+                          .map((account) => (
+                            <option key={account.id} value={account.id}>
+                              {account.username} ({account.email})
+                            </option>
+                          ))}
+                      </select>
+                      <button type="button" className="btn-sm" onClick={loadStaffAssignments} disabled={staffLoading}>
+                        {staffLoading ? "Refreshing…" : "Refresh assignments"}
+                      </button>
+                    </div>
+
+                    <div className="admin-badge-form">
+                      <input placeholder="Level key" value={staffLevelKey} onChange={(e) => setStaffLevelKey(e.target.value)} />
+                      <input placeholder="Display title" value={staffTitle} onChange={(e) => setStaffTitle(e.target.value)} />
+                    </div>
+
+                    <textarea
+                      className="admin-official-textarea"
+                      placeholder="Internal notes for this staff assignment"
+                      value={staffNotes}
+                      onChange={(e) => setStaffNotes(e.target.value)}
+                    />
+
+                    <div className="admin-permission-grid">
+                      {PANEL_PERMISSION_OPTIONS.map((permission) => (
+                        <label key={permission.id} className="admin-permission-card">
+                          <input
+                            type="checkbox"
+                            checked={staffPermissions.includes(permission.id)}
+                            onChange={() => toggleStaffPermission(permission.id)}
+                          />
+                          <strong>{permission.label}</strong>
+                          <span>{permission.description}</span>
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="admin-badge-actions">
+                      <button type="button" onClick={saveStaffAssignment} disabled={staffBusy}>
+                        {staffBusy ? "Saving…" : "Save assignment"}
+                      </button>
+                      <button type="button" className="danger" onClick={() => removeStaffAssignment()} disabled={staffBusy}>
+                        Remove assignment
+                      </button>
+                    </div>
+                    </div>
+                  )}
+
+                  {isStaffPermissionsTab && (
+                    <div className="admin-card">
+                    <h3>Current panel staff</h3>
+                    {staffLoading ? (
+                      <p className="text-dim">Loading staff assignments…</p>
+                    ) : staffAssignments.length === 0 ? (
+                      <p className="text-dim">No panel staff assigned yet.</p>
+                    ) : (
+                      <div className="admin-staff-list">
+                        {staffAssignments.map((assignment) => (
+                          <button
+                            key={assignment.adminId || assignment.userId}
+                            type="button"
+                            className="admin-staff-row"
+                            onClick={() => editStaffAssignment(assignment)}
+                          >
+                            <strong>{assignment.username}</strong>
+                            <span>{assignment.title}</span>
+                            <small>{assignment.permissions.join(", ")}</small>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    </div>
+                  )}
+
+                  <div className="admin-card">
+                    <h3>{isStaffAccountsTab ? "Panel account directory" : "Staff account directory"}</h3>
+                    {panelAccountsLoading ? (
+                      <p className="text-dim">Loading panel accounts…</p>
+                    ) : panelAccounts.length === 0 ? (
+                      <p className="text-dim">No panel accounts available.</p>
+                    ) : (
+                      <div className="admin-staff-list">
+                        {panelAccounts
+                          .filter((account) => (isStaffPermissionsTab ? account.role === "staff" : true))
+                          .map((account) => (
+                          <button
+                            key={account.id}
+                            type="button"
+                            className={`admin-staff-row ${(isStaffAccountsTab ? panelAccountDraft.id : staffUserId) === account.id ? "active" : ""}`}
+                            onClick={() => {
+                              openPanelAccountDraft(account);
+                              if (account.role === "staff") setStaffUserId(account.id);
+                            }}
+                          >
+                            <strong>{account.username}</strong>
+                            <span>{account.role} · {account.title || "Staff"}</span>
+                            <small>{account.email}</small>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {isStaffSchedulingTab && canManageSupport && (
+              <>
+                <div className="admin-cards">
+                  <div className="admin-card">
+                    <h3>Scheduled shifts</h3>
+                    <p><strong>{schedules.length}</strong> shift(s)</p>
+                    <p className="text-dim">Range {scheduleStartDate || "…"} to {scheduleEndDate || "…"}</p>
+                  </div>
+                  <div className="admin-card">
+                    <h3>Coverage focus</h3>
+                    <p><strong>{scheduleFilterAdminId ? "Filtered" : "All staff"}</strong></p>
+                    <p className="text-dim">Assign support, moderation, operations, and on-call windows.</p>
+                  </div>
+                </div>
+
+                <div className="admin-search-row">
+                  <input type="date" value={scheduleStartDate} onChange={(e) => setScheduleStartDate(e.target.value)} />
+                  <input type="date" value={scheduleEndDate} onChange={(e) => setScheduleEndDate(e.target.value)} />
+                  <select value={scheduleFilterAdminId} onChange={(e) => setScheduleFilterAdminId(e.target.value)}>
+                    <option value="">All panel staff</option>
+                    {panelAccounts
+                      .filter((account) => !account.disabledAt)
+                      .map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.username} ({account.role})
+                        </option>
+                      ))}
+                  </select>
+                  <button type="button" onClick={() => loadStaffSchedules({ showSuccess: true })} disabled={schedulesLoading}>
+                    {schedulesLoading ? "Refreshing…" : "Refresh schedules"}
+                  </button>
+                </div>
+
+                <div className="admin-official-grid">
+                  <div className="admin-card">
+                    <h3>{scheduleDraft.id ? "Edit shift" : "Create shift"}</h3>
+                    <div className="admin-badge-form admin-staff-schedule-grid">
+                      <select value={scheduleDraft.adminId} onChange={(e) => setScheduleDraft((current) => ({ ...current, adminId: e.target.value }))}>
+                        <option value="">Select panel staff…</option>
+                        {panelAccounts
+                          .filter((account) => !account.disabledAt)
+                          .map((account) => (
+                            <option key={account.id} value={account.id}>
+                              {account.username} ({account.role})
+                            </option>
+                          ))}
+                      </select>
+                      <input type="date" value={scheduleDraft.shiftDate} onChange={(e) => setScheduleDraft((current) => ({ ...current, shiftDate: e.target.value }))} />
+                      <input type="time" value={scheduleDraft.startTime} onChange={(e) => setScheduleDraft((current) => ({ ...current, startTime: e.target.value }))} />
+                      <input type="time" value={scheduleDraft.endTime} onChange={(e) => setScheduleDraft((current) => ({ ...current, endTime: e.target.value }))} />
+                      <select value={scheduleDraft.shiftType} onChange={(e) => setScheduleDraft((current) => ({ ...current, shiftType: e.target.value }))}>
+                        {STAFF_SCHEDULE_TYPES.map((entry) => (
+                          <option key={entry.id} value={entry.id}>{entry.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        placeholder="Timezone (e.g. Europe/London)"
+                        value={scheduleDraft.timezone}
+                        onChange={(e) => setScheduleDraft((current) => ({ ...current, timezone: e.target.value }))}
+                      />
+                    </div>
+
+                    <textarea
+                      className="admin-official-textarea"
+                      placeholder="Shift notes"
+                      value={scheduleDraft.note}
+                      onChange={(e) => setScheduleDraft((current) => ({ ...current, note: e.target.value }))}
+                    />
+
+                    <div className="admin-badge-actions">
+                      <button type="button" onClick={saveSchedule} disabled={schedulesBusy}>
+                        {schedulesBusy ? "Saving…" : scheduleDraft.id ? "Update shift" : "Create shift"}
+                      </button>
+                      <button type="button" className="btn-sm" onClick={resetScheduleDraft} disabled={schedulesBusy}>
+                        Clear form
+                      </button>
+                      <button type="button" className="danger" onClick={() => deleteSchedule()} disabled={schedulesBusy || !scheduleDraft.id}>
+                        Remove shift
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="admin-card">
+                    <h3>Shift board</h3>
+                    {schedulesLoading ? (
+                      <p className="text-dim">Loading schedules…</p>
+                    ) : schedules.length === 0 ? (
+                      <p className="text-dim">No shifts in this range.</p>
+                    ) : (
+                      <div className="admin-users-table-wrap">
+                        <table className="admin-table">
+                          <thead>
+                            <tr>
+                              <th>Date</th>
+                              <th>Staff</th>
+                              <th>Window</th>
+                              <th>Type</th>
+                              <th>Timezone</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {schedules.map((entry) => (
+                              <tr
+                                key={entry.id}
+                                className={scheduleDraft.id === entry.id ? "admin-support-row-active" : ""}
+                                onClick={() => editSchedule(entry)}
+                              >
+                                <td>{entry.shiftDate}</td>
+                                <td>{entry?.staff?.username || entry.adminId}</td>
+                                <td>{entry.startTime} - {entry.endTime}</td>
+                                <td>{entry.shiftType}</td>
+                                <td>{entry.timezone}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {isStaffSupportTab && canManageSupport && (
+              <>
+                <div className="admin-cards">
+                  <div className="admin-card">
+                    <h3>Unresolved tickets</h3>
+                    <p><strong>{supportOverview?.unresolvedTickets ?? 0}</strong></p>
+                    <p className="text-dim">Open + waiting queues.</p>
+                  </div>
+                  <div className="admin-card">
+                    <h3>Unassigned tickets</h3>
+                    <p><strong>{supportOverview?.unassignedTickets ?? 0}</strong></p>
+                    <p className="text-dim">Needs triage assignment.</p>
+                  </div>
+                  <div className="admin-card">
+                    <h3>Total tickets</h3>
+                    <p><strong>{supportOverview?.totalTickets ?? 0}</strong></p>
+                    <p className="text-dim">All historical support references.</p>
+                  </div>
+                </div>
+
+                <div className="admin-search-row">
+                  <select value={supportFilters.category} onChange={(e) => setSupportFilters((current) => ({ ...current, category: e.target.value }))}>
+                    <option value="">All types</option>
+                    {SUPPORT_CATEGORY_OPTIONS.map((entry) => (
+                      <option key={entry.id} value={entry.id}>{entry.label}</option>
+                    ))}
+                  </select>
+                  <select value={supportFilters.status} onChange={(e) => setSupportFilters((current) => ({ ...current, status: e.target.value }))}>
+                    <option value="">All statuses</option>
+                    {SUPPORT_STATUS_OPTIONS.map((entry) => (
+                      <option key={entry.id} value={entry.id}>{entry.label}</option>
+                    ))}
+                  </select>
+                  <select value={supportFilters.priority} onChange={(e) => setSupportFilters((current) => ({ ...current, priority: e.target.value }))}>
+                    <option value="">All priorities</option>
+                    {SUPPORT_PRIORITY_OPTIONS.map((entry) => (
+                      <option key={entry.id} value={entry.id}>{entry.label}</option>
+                    ))}
+                  </select>
+                  <select value={supportFilters.assignedToUserId} onChange={(e) => setSupportFilters((current) => ({ ...current, assignedToUserId: e.target.value }))}>
+                    <option value="">Anyone</option>
+                    <option value="__unassigned__">Unassigned</option>
+                    <option value="__me__">Assigned to me</option>
+                    {panelAccounts
+                      .filter((account) => !account.disabledAt)
+                      .map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.username}
+                        </option>
+                      ))}
+                  </select>
+                  <input
+                    placeholder="Search reference, subject, username, or email"
+                    value={supportFilters.query}
+                    onChange={(e) => setSupportFilters((current) => ({ ...current, query: e.target.value }))}
+                    onKeyDown={(e) => e.key === "Enter" && loadSupportTickets({ showSuccess: true })}
+                  />
+                  <button type="button" onClick={() => loadSupportTickets({ showSuccess: true })} disabled={supportLoading}>
+                    {supportLoading ? "Refreshing…" : "Apply filters"}
+                  </button>
+                </div>
+
+                <div className="admin-staff-support-grid">
+                  <div className="admin-card">
+                    <h3>Ticket queue</h3>
+                    {supportLoading ? (
+                      <p className="text-dim">Loading support tickets…</p>
+                    ) : supportTickets.length === 0 ? (
+                      <p className="text-dim">No tickets match the current filters.</p>
+                    ) : (
+                      <div className="admin-users-table-wrap">
+                        <table className="admin-table">
+                          <thead>
+                            <tr>
+                              <th>Reference</th>
+                              <th>Type</th>
+                              <th>Status</th>
+                              <th>Priority</th>
+                              <th>Assignee</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {supportTickets.map((ticket) => (
+                              <tr
+                                key={ticket.id}
+                                className={selectedSupportTicketId === ticket.id ? "admin-support-row-active" : ""}
+                                onClick={() => openSupportTicket(ticket.id)}
+                              >
+                                <td>
+                                  <strong>{ticket.reference}</strong>
+                                  <div className="text-dim">{ticket.subject}</div>
+                                </td>
+                                <td>{formatSupportCategory(ticket.category)}</td>
+                                <td>{formatSupportStatus(ticket.status)}</td>
+                                <td>{formatSupportPriority(ticket.priority)}</td>
+                                <td>{ticket.assignedTo?.username || "Unassigned"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="admin-card">
+                    <h3>Ticket workspace</h3>
+                    {!selectedSupportTicketId ? (
+                      <p className="text-dim">Pick a ticket from the queue to inspect and respond.</p>
+                    ) : supportDetailLoading ? (
+                      <p className="text-dim">Loading ticket details…</p>
+                    ) : !supportDetail?.ticket ? (
+                      <p className="text-dim">Ticket could not be loaded.</p>
+                    ) : (
+                      <>
+                        <div className="admin-support-ticket-head">
+                          <strong>{supportDetail.ticket.reference}</strong>
+                          <span>{supportDetail.ticket.contactEmail}</span>
+                        </div>
+
+                        <div className="admin-badge-form admin-staff-schedule-grid">
+                          <input
+                            placeholder="Subject"
+                            value={supportUpdateDraft.subject}
+                            onChange={(e) => setSupportUpdateDraft((current) => ({ ...current, subject: e.target.value }))}
+                          />
+                          <select
+                            value={supportUpdateDraft.category}
+                            onChange={(e) => setSupportUpdateDraft((current) => ({ ...current, category: e.target.value }))}
+                          >
+                            {SUPPORT_CATEGORY_OPTIONS.map((entry) => (
+                              <option key={entry.id} value={entry.id}>{entry.label}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={supportUpdateDraft.priority}
+                            onChange={(e) => setSupportUpdateDraft((current) => ({ ...current, priority: e.target.value }))}
+                          >
+                            {SUPPORT_PRIORITY_OPTIONS.map((entry) => (
+                              <option key={entry.id} value={entry.id}>{entry.label}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={supportUpdateDraft.status}
+                            onChange={(e) => setSupportUpdateDraft((current) => ({ ...current, status: e.target.value }))}
+                          >
+                            {SUPPORT_STATUS_OPTIONS.map((entry) => (
+                              <option key={entry.id} value={entry.id}>{entry.label}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={supportUpdateDraft.assignedToUserId || "__unassigned__"}
+                            onChange={(e) => setSupportUpdateDraft((current) => ({ ...current, assignedToUserId: e.target.value }))}
+                          >
+                            <option value="__unassigned__">Unassigned</option>
+                            <option value="__me__">Assign to me</option>
+                            {panelAccounts
+                              .filter((account) => !account.disabledAt)
+                              .map((account) => (
+                                <option key={account.id} value={account.id}>{account.username}</option>
+                              ))}
+                          </select>
+                        </div>
+
+                        <div className="admin-badge-actions">
+                          <button type="button" onClick={saveSupportTicketUpdates} disabled={supportBusy}>
+                            {supportBusy ? "Saving…" : "Save ticket changes"}
+                          </button>
+                          <button type="button" className="btn-sm" onClick={() => openSupportTicket(selectedSupportTicketId)} disabled={supportBusy}>
+                            Reload ticket
+                          </button>
+                        </div>
+
+                        <div className="admin-support-thread">
+                          {(supportDetail.messages || []).map((message) => (
+                            <article
+                              key={message.id}
+                              className={`admin-support-message ${message.isInternalNote ? "is-internal" : ""}`}
+                            >
+                              <div className="admin-support-message-head">
+                                <strong>{message.authorName || message.authorType}</strong>
+                                <span>{formatAdminDateTime(message.createdAt)}</span>
+                              </div>
+                              <p>{message.body}</p>
+                            </article>
+                          ))}
+                        </div>
+
+                        <textarea
+                          className="admin-official-textarea"
+                          placeholder="Write a reply to the requester or an internal note..."
+                          value={supportReplyMessage}
+                          onChange={(e) => setSupportReplyMessage(e.target.value)}
+                        />
+                        <div className="admin-badge-form">
+                          <label className="admin-setting-check">
+                            <input
+                              type="checkbox"
+                              checked={supportReplyInternal}
+                              onChange={(e) => setSupportReplyInternal(e.target.checked)}
+                            />
+                            <span>Send as internal note</span>
+                          </label>
+                          <select value={supportReplyNextStatus} onChange={(e) => setSupportReplyNextStatus(e.target.value)}>
+                            <option value="">Auto status</option>
+                            {SUPPORT_STATUS_OPTIONS.map((entry) => (
+                              <option key={entry.id} value={entry.id}>{entry.label}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="admin-badge-actions">
+                          <button type="button" onClick={sendSupportReply} disabled={supportBusy}>
+                            {supportBusy ? "Sending…" : "Send reply"}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {!canManageStaff && !canManageSupport && (
+              <div className="admin-card">
+                <p className="text-dim">Your account can sign in, but it does not currently have staff-hub permissions.</p>
               </div>
-            </div>
+            )}
           </section>
         )}
 
@@ -2811,6 +4095,7 @@ export function AdminApp() {
             </div>
           </section>
         )}
+      </div>
       </div>
 
       {status && (

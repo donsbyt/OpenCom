@@ -15,6 +15,7 @@ export type PlatformPanelPermission =
 export type PanelRole = "staff" | "admin" | "owner";
 
 export type PanelStaffAssignment = {
+  adminId: string;
   userId: string;
   username: string;
   email: string;
@@ -105,6 +106,7 @@ function mapStaffAssignment(
   if (row.role !== "staff") return null;
 
   return {
+    adminId: row.id,
     userId: row.id,
     username: row.username,
     email: row.email,

@@ -1,6 +1,8 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { ulidLike } from "@ods/shared/ids.js";
 import { q } from "../db.js";
+import { hashPassword } from "../crypto.js";
 import { parseBody } from "../validation.js";
 import { getActiveManualBoostGrant, getBoostTrialWindow, reconcileBoostBadge } from "../boost.js";
 import { env } from "../env.js";
@@ -13,8 +15,10 @@ import {
 } from "../officialMessages.js";
 import {
   PLATFORM_PANEL_PERMISSIONS,
+  type PlatformPanelPermission,
   getPanelStaffAssignment,
   listPanelStaffAssignments,
+  normalizePlatformPermissions,
   requirePanelAccess,
   requirePanelPermission,
   serializePlatformPermissions,
@@ -64,6 +68,45 @@ type BadgeDefinitionRow = {
   fg_color: string | null;
   created_by_user_id: string | null;
   updated_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type PanelAdminAccountRow = {
+  id: string;
+  email: string;
+  username: string;
+  role: "owner" | "admin" | "staff";
+  title: string;
+  permissions_json: string | null;
+  notes: string | null;
+  assigned_by: string | null;
+  assigned_by_username: string | null;
+  two_factor_enabled: number;
+  force_two_factor_setup: number;
+  disabled_at: string | null;
+  last_login_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type PanelStaffScheduleRow = {
+  id: string;
+  admin_id: string;
+  shift_date: string;
+  start_time: string;
+  end_time: string;
+  timezone: string;
+  shift_type: string;
+  note: string | null;
+  admin_username: string;
+  admin_email: string;
+  admin_title: string;
+  admin_role: "owner" | "admin" | "staff";
+  created_by: string | null;
+  created_by_username: string | null;
+  updated_by: string | null;
+  updated_by_username: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -212,6 +255,82 @@ async function requirePanelOwner(req: any) {
   return access;
 }
 
+function mapPanelAdminAccount(row: PanelAdminAccountRow) {
+  return {
+    adminId: row.id,
+    id: row.id,
+    email: row.email,
+    username: row.username,
+    role: row.role,
+    title: row.title || "Staff",
+    permissions: normalizePlatformPermissions(row.permissions_json || "[]"),
+    notes: row.notes || null,
+    assignedBy: row.assigned_by || null,
+    assignedByUsername: row.assigned_by_username || null,
+    twoFactorEnabled: Boolean(row.two_factor_enabled),
+    forceTwoFactorSetup: Boolean(row.force_two_factor_setup),
+    disabledAt: row.disabled_at || null,
+    lastLoginAt: row.last_login_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapPanelStaffSchedule(row: PanelStaffScheduleRow) {
+  return {
+    id: row.id,
+    adminId: row.admin_id,
+    shiftDate: row.shift_date,
+    startTime: row.start_time,
+    endTime: row.end_time,
+    timezone: row.timezone || "UTC",
+    shiftType: row.shift_type || "support",
+    note: row.note || "",
+    staff: {
+      adminId: row.admin_id,
+      username: row.admin_username,
+      email: row.admin_email,
+      title: row.admin_title || "Staff",
+      role: row.admin_role,
+    },
+    createdBy: row.created_by || null,
+    createdByUsername: row.created_by_username || null,
+    updatedBy: row.updated_by || null,
+    updatedByUsername: row.updated_by_username || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function assertScheduleWindow(startTime: string, endTime: string) {
+  if (startTime >= endTime) {
+    throw new Error("INVALID_SCHEDULE_WINDOW");
+  }
+}
+
+function panelRoleRank(role: "owner" | "admin" | "staff") {
+  if (role === "owner") return 3;
+  if (role === "admin") return 2;
+  return 1;
+}
+
+function defaultPanelTitle(role: "owner" | "admin" | "staff") {
+  if (role === "owner") return "Owner";
+  if (role === "admin") return "Admin";
+  return "Staff";
+}
+
+function normalizePanelAccountPermissions(
+  role: "owner" | "admin" | "staff",
+  permissions: PlatformPanelPermission[] | undefined,
+): PlatformPanelPermission[] {
+  if (role === "owner" || role === "admin") {
+    return [...PLATFORM_PANEL_PERMISSIONS];
+  }
+  const normalized = normalizePlatformPermissions(permissions || []);
+  return normalized.length ? normalized : ["manage_support"];
+}
+
 const PANEL_PERMISSION_ENUM = z.enum(PLATFORM_PANEL_PERMISSIONS);
 
 const staffAssignmentBodySchema = z.object({
@@ -219,6 +338,61 @@ const staffAssignmentBodySchema = z.object({
   title: z.string().trim().min(2).max(96),
   permissions: z.array(PANEL_PERMISSION_ENUM).min(1).max(PLATFORM_PANEL_PERMISSIONS.length),
   notes: z.string().trim().max(255).optional(),
+});
+
+const panelAccountListQuerySchema = z.object({
+  includeDisabled: z.coerce.boolean().optional(),
+});
+
+const panelAccountRoleEnum = z.enum(["owner", "admin", "staff"]);
+
+const panelAccountCreateBodySchema = z.object({
+  email: z.string().trim().email().max(190),
+  username: z.string().trim().min(2).max(64),
+  password: z.string().min(8).max(200),
+  role: panelAccountRoleEnum.default("staff"),
+  title: z.string().trim().min(2).max(96).optional(),
+  permissions: z.array(PANEL_PERMISSION_ENUM).max(PLATFORM_PANEL_PERMISSIONS.length).optional(),
+  notes: z.string().trim().max(255).optional(),
+});
+
+const panelAccountUpdateBodySchema = z.object({
+  email: z.string().trim().email().max(190).optional(),
+  username: z.string().trim().min(2).max(64).optional(),
+  role: panelAccountRoleEnum.optional(),
+  title: z.string().trim().min(2).max(96).optional(),
+  permissions: z.array(PANEL_PERMISSION_ENUM).max(PLATFORM_PANEL_PERMISSIONS.length).optional(),
+  notes: z.preprocess((value) => {
+    if (value === null) return null;
+    if (value == null) return undefined;
+    const trimmed = String(value).trim();
+    return trimmed ? trimmed : null;
+  }, z.string().max(255).nullable().optional()),
+  disabled: z.boolean().optional(),
+});
+
+const panelAccountPasswordBodySchema = z.object({
+  password: z.string().min(8).max(200),
+  revokeSessions: z.boolean().optional(),
+});
+
+const scheduleDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const scheduleTimeSchema = z.string().regex(/^\d{2}:\d{2}$/);
+
+const panelStaffScheduleBodySchema = z.object({
+  adminId: z.string().trim().min(3).max(64),
+  shiftDate: scheduleDateSchema,
+  startTime: scheduleTimeSchema,
+  endTime: scheduleTimeSchema,
+  timezone: z.string().trim().min(2).max(64).optional(),
+  shiftType: z.string().trim().min(2).max(32).optional(),
+  note: z.string().trim().max(255).optional(),
+});
+
+const panelStaffScheduleListQuerySchema = z.object({
+  startDate: scheduleDateSchema.optional(),
+  endDate: scheduleDateSchema.optional(),
+  adminId: optionalTrimmedString(64),
 });
 
 const badgeIdSchema = z
@@ -1404,6 +1578,503 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       skippedUserIds,
       recipients: summaryRecipients
     };
+  });
+
+  app.get("/v1/admin/panel-accounts", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    const access = await requirePanelAccess(req);
+    if (
+      !access.isPlatformOwner &&
+      !access.isPlatformAdmin &&
+      !access.permissions.includes("manage_support")
+    ) {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const query = panelAccountListQuerySchema.parse(req.query || {});
+    const rows = await q<PanelAdminAccountRow>(
+      `SELECT pa.id, pa.email, pa.username, pa.role, pa.title, pa.permissions_json,
+              pa.notes, pa.assigned_by, assigner.username AS assigned_by_username,
+              pa.two_factor_enabled, pa.force_two_factor_setup,
+              pa.disabled_at, pa.last_login_at, pa.created_at, pa.updated_at
+         FROM panel_admin_users pa
+         LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
+        ${query.includeDisabled ? "" : "WHERE pa.disabled_at IS NULL"}
+        ORDER BY
+          CASE pa.role
+            WHEN 'owner' THEN 0
+            WHEN 'admin' THEN 1
+            ELSE 2
+          END ASC,
+          pa.username ASC,
+          pa.created_at ASC`,
+    );
+
+    return {
+      accounts: rows.map(mapPanelAdminAccount),
+    };
+  });
+
+  app.post("/v1/admin/panel-accounts", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    const actorId = getActorAdminId(req);
+    const access = await requirePanelAccess(req);
+    if (!access.isPlatformOwner && !access.isPlatformAdmin) {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const body = parseBody(panelAccountCreateBodySchema, req.body);
+    if (body.role !== "staff" && !access.isPlatformOwner) {
+      return rep.code(403).send({ error: "ONLY_OWNER_CAN_CREATE_PRIVILEGED_ROLES" });
+    }
+
+    const existing = await q<{ id: string }>(
+      `SELECT id
+         FROM panel_admin_users
+        WHERE LOWER(email)=LOWER(:email)
+        LIMIT 1`,
+      { email: body.email.trim() },
+    );
+    if (existing.length) {
+      return rep.code(409).send({ error: "ADMIN_EMAIL_EXISTS" });
+    }
+
+    const accountId = ulidLike();
+    const passwordHash = await hashPassword(body.password);
+    const role = body.role;
+    const permissions = normalizePanelAccountPermissions(role, body.permissions);
+
+    await q(
+      `INSERT INTO panel_admin_users (
+         id,email,username,password_hash,role,title,permissions_json,notes,
+         assigned_by,two_factor_enabled,force_two_factor_setup,totp_secret_encrypted,disabled_at
+       ) VALUES (
+         :id,:email,:username,:passwordHash,:role,:title,:permissionsJson,:notes,
+         :assignedBy,0,1,NULL,NULL
+       )`,
+      {
+        id: accountId,
+        email: body.email.trim(),
+        username: body.username.trim(),
+        passwordHash,
+        role,
+        title: body.title?.trim() || defaultPanelTitle(role),
+        permissionsJson: serializePlatformPermissions(permissions),
+        notes: body.notes?.trim() || null,
+        assignedBy: actorId || null,
+      },
+    );
+
+    const rows = await q<PanelAdminAccountRow>(
+      `SELECT pa.id, pa.email, pa.username, pa.role, pa.title, pa.permissions_json,
+              pa.notes, pa.assigned_by, assigner.username AS assigned_by_username,
+              pa.two_factor_enabled, pa.force_two_factor_setup,
+              pa.disabled_at, pa.last_login_at, pa.created_at, pa.updated_at
+         FROM panel_admin_users pa
+         LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
+        WHERE pa.id=:accountId
+        LIMIT 1`,
+      { accountId },
+    );
+
+    return rep.code(201).send({
+      ok: true,
+      account: rows[0] ? mapPanelAdminAccount(rows[0]) : null,
+    });
+  });
+
+  app.patch("/v1/admin/panel-accounts/:adminId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    const actorId = getActorAdminId(req);
+    const access = await requirePanelAccess(req);
+    if (!access.isPlatformOwner && !access.isPlatformAdmin) {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const { adminId } = z.object({ adminId: z.string().trim().min(3).max(64) }).parse(req.params);
+    const body = parseBody(panelAccountUpdateBodySchema, req.body || {});
+
+    const rows = await q<PanelAdminAccountRow>(
+      `SELECT pa.id, pa.email, pa.username, pa.role, pa.title, pa.permissions_json,
+              pa.notes, pa.assigned_by, assigner.username AS assigned_by_username,
+              pa.two_factor_enabled, pa.force_two_factor_setup,
+              pa.disabled_at, pa.last_login_at, pa.created_at, pa.updated_at
+         FROM panel_admin_users pa
+         LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
+        WHERE pa.id=:adminId
+        LIMIT 1`,
+      { adminId },
+    );
+    const existing = rows[0];
+    if (!existing) return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
+
+    const currentRole = existing.role;
+    const nextRole = body.role || currentRole;
+
+    if (adminId === actorId && body.disabled === true) {
+      return rep.code(400).send({ error: "CANNOT_DISABLE_SELF" });
+    }
+    if (adminId === actorId && body.role && panelRoleRank(body.role) < panelRoleRank(currentRole)) {
+      return rep.code(400).send({ error: "CANNOT_DEMOTE_SELF" });
+    }
+
+    if (!access.isPlatformOwner) {
+      if (currentRole !== "staff") {
+        return rep.code(403).send({ error: "ONLY_OWNER_CAN_EDIT_PRIVILEGED_ROLES" });
+      }
+      if (nextRole !== "staff") {
+        return rep.code(403).send({ error: "ONLY_OWNER_CAN_PROMOTE_ROLES" });
+      }
+    }
+
+    if (body.email && body.email.trim().toLowerCase() !== existing.email.trim().toLowerCase()) {
+      const emailRows = await q<{ id: string }>(
+        `SELECT id
+           FROM panel_admin_users
+          WHERE LOWER(email)=LOWER(:email)
+            AND id<>:adminId
+          LIMIT 1`,
+        { email: body.email.trim(), adminId },
+      );
+      if (emailRows.length) {
+        return rep.code(409).send({ error: "ADMIN_EMAIL_EXISTS" });
+      }
+    }
+
+    const permissions = normalizePanelAccountPermissions(
+      nextRole,
+      body.permissions || normalizePlatformPermissions(existing.permissions_json || "[]"),
+    );
+
+    await q(
+      `UPDATE panel_admin_users
+          SET email=:email,
+              username=:username,
+              role=:role,
+              title=:title,
+              permissions_json=:permissionsJson,
+              notes=:notes,
+              disabled_at=CASE
+                WHEN :disableMode=1 THEN NOW()
+                WHEN :disableMode=0 THEN NULL
+                ELSE disabled_at
+              END,
+              assigned_by=:actorId
+        WHERE id=:adminId`,
+      {
+        adminId,
+        email: body.email?.trim() || existing.email,
+        username: body.username?.trim() || existing.username,
+        role: nextRole,
+        title: body.title?.trim() || existing.title || defaultPanelTitle(nextRole),
+        permissionsJson: serializePlatformPermissions(permissions),
+        notes: body.notes !== undefined ? body.notes : existing.notes,
+        disableMode: body.disabled === undefined ? -1 : (body.disabled ? 1 : 0),
+        actorId: actorId || null,
+      },
+    );
+
+    if (body.disabled === true) {
+      await q(
+        `UPDATE panel_admin_refresh_tokens
+            SET revoked_at=NOW()
+          WHERE admin_id=:adminId
+            AND revoked_at IS NULL`,
+        { adminId },
+      );
+    }
+
+    const updatedRows = await q<PanelAdminAccountRow>(
+      `SELECT pa.id, pa.email, pa.username, pa.role, pa.title, pa.permissions_json,
+              pa.notes, pa.assigned_by, assigner.username AS assigned_by_username,
+              pa.two_factor_enabled, pa.force_two_factor_setup,
+              pa.disabled_at, pa.last_login_at, pa.created_at, pa.updated_at
+         FROM panel_admin_users pa
+         LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
+        WHERE pa.id=:adminId
+        LIMIT 1`,
+      { adminId },
+    );
+
+    return {
+      ok: true,
+      account: updatedRows[0] ? mapPanelAdminAccount(updatedRows[0]) : null,
+    };
+  });
+
+  app.post("/v1/admin/panel-accounts/:adminId/password", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    const actorId = getActorAdminId(req);
+    const access = await requirePanelAccess(req);
+    if (!access.isPlatformOwner && !access.isPlatformAdmin) {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const { adminId } = z.object({ adminId: z.string().trim().min(3).max(64) }).parse(req.params);
+    const body = parseBody(panelAccountPasswordBodySchema, req.body);
+
+    const targetRows = await q<{ id: string; role: "owner" | "admin" | "staff" }>(
+      `SELECT id, role
+         FROM panel_admin_users
+        WHERE id=:adminId
+        LIMIT 1`,
+      { adminId },
+    );
+    if (!targetRows.length) {
+      return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
+    }
+
+    if (!access.isPlatformOwner && targetRows[0].role !== "staff") {
+      return rep.code(403).send({ error: "ONLY_OWNER_CAN_RESET_PRIVILEGED_PASSWORDS" });
+    }
+
+    const passwordHash = await hashPassword(body.password);
+    await q(
+      `UPDATE panel_admin_users
+          SET password_hash=:passwordHash,
+              two_factor_enabled=0,
+              force_two_factor_setup=1,
+              totp_secret_encrypted=NULL,
+              assigned_by=:actorId
+        WHERE id=:adminId`,
+      {
+        adminId,
+        passwordHash,
+        actorId: actorId || null,
+      },
+    );
+
+    const shouldRevoke = body.revokeSessions !== false;
+    if (shouldRevoke) {
+      await q(
+        `UPDATE panel_admin_refresh_tokens
+            SET revoked_at=NOW()
+          WHERE admin_id=:adminId
+            AND revoked_at IS NULL`,
+        { adminId },
+      );
+    }
+
+    return {
+      ok: true,
+      adminId,
+      sessionsRevoked: shouldRevoke,
+    };
+  });
+
+  app.get("/v1/admin/staff/schedules", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelPermission(req, "manage_support");
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const parsed = panelStaffScheduleListQuerySchema.parse(req.query || {});
+    const startDate = parsed.startDate || "1970-01-01";
+    const endDate = parsed.endDate || "2999-12-31";
+    if (startDate > endDate) {
+      return rep.code(400).send({ error: "INVALID_DATE_RANGE" });
+    }
+
+    const where: string[] = ["s.shift_date >= :startDate", "s.shift_date <= :endDate"];
+    const params: Record<string, string> = { startDate, endDate };
+    if (parsed.adminId) {
+      where.push("s.admin_id=:adminId");
+      params.adminId = parsed.adminId;
+    }
+
+    const rows = await q<PanelStaffScheduleRow>(
+      `SELECT s.id, s.admin_id, s.shift_date, s.start_time, s.end_time, s.timezone,
+              s.shift_type, s.note, s.created_by, creator.username AS created_by_username,
+              s.updated_by, updater.username AS updated_by_username, s.created_at, s.updated_at,
+              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title,
+              pa.role AS admin_role
+         FROM panel_staff_schedules s
+         JOIN panel_admin_users pa ON pa.id=s.admin_id
+         LEFT JOIN panel_admin_users creator ON creator.id=s.created_by
+         LEFT JOIN panel_admin_users updater ON updater.id=s.updated_by
+        WHERE ${where.join(" AND ")}
+        ORDER BY s.shift_date ASC, s.start_time ASC, s.end_time ASC, s.id ASC`,
+      params,
+    );
+
+    return {
+      schedules: rows.map(mapPanelStaffSchedule),
+      range: {
+        startDate,
+        endDate,
+      },
+    };
+  });
+
+  app.post("/v1/admin/staff/schedules", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelPermission(req, "manage_support");
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const body = parseBody(panelStaffScheduleBodySchema, req.body);
+    try {
+      assertScheduleWindow(body.startTime, body.endTime);
+    } catch {
+      return rep.code(400).send({ error: "INVALID_SCHEDULE_WINDOW" });
+    }
+
+    const targetRows = await q<{ id: string }>(
+      `SELECT id
+         FROM panel_admin_users
+        WHERE id=:adminId
+          AND disabled_at IS NULL
+        LIMIT 1`,
+      { adminId: body.adminId },
+    );
+    if (!targetRows.length) {
+      return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
+    }
+
+    const actorId = getActorAdminId(req);
+    const scheduleId = ulidLike();
+
+    await q(
+      `INSERT INTO panel_staff_schedules (
+         id, admin_id, shift_date, start_time, end_time, timezone, shift_type, note, created_by, updated_by
+       ) VALUES (
+         :id, :adminId, :shiftDate, :startTime, :endTime, :timezone, :shiftType, :note, :actorId, :actorId
+       )`,
+      {
+        id: scheduleId,
+        adminId: body.adminId,
+        shiftDate: body.shiftDate,
+        startTime: body.startTime,
+        endTime: body.endTime,
+        timezone: body.timezone || "UTC",
+        shiftType: body.shiftType || "support",
+        note: body.note || null,
+        actorId: actorId || null,
+      },
+    );
+
+    const rows = await q<PanelStaffScheduleRow>(
+      `SELECT s.id, s.admin_id, s.shift_date, s.start_time, s.end_time, s.timezone,
+              s.shift_type, s.note, s.created_by, creator.username AS created_by_username,
+              s.updated_by, updater.username AS updated_by_username, s.created_at, s.updated_at,
+              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title,
+              pa.role AS admin_role
+         FROM panel_staff_schedules s
+         JOIN panel_admin_users pa ON pa.id=s.admin_id
+         LEFT JOIN panel_admin_users creator ON creator.id=s.created_by
+         LEFT JOIN panel_admin_users updater ON updater.id=s.updated_by
+        WHERE s.id=:id
+        LIMIT 1`,
+      { id: scheduleId },
+    );
+
+    return rep.code(201).send({
+      ok: true,
+      schedule: rows[0] ? mapPanelStaffSchedule(rows[0]) : null,
+    });
+  });
+
+  app.put("/v1/admin/staff/schedules/:scheduleId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelPermission(req, "manage_support");
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const { scheduleId } = z.object({ scheduleId: z.string().trim().min(3).max(64) }).parse(req.params);
+    const body = parseBody(panelStaffScheduleBodySchema, req.body);
+    try {
+      assertScheduleWindow(body.startTime, body.endTime);
+    } catch {
+      return rep.code(400).send({ error: "INVALID_SCHEDULE_WINDOW" });
+    }
+
+    const targetRows = await q<{ id: string }>(
+      `SELECT id
+         FROM panel_admin_users
+        WHERE id=:adminId
+          AND disabled_at IS NULL
+        LIMIT 1`,
+      { adminId: body.adminId },
+    );
+    if (!targetRows.length) {
+      return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
+    }
+
+    const existingRows = await q<{ id: string }>(
+      `SELECT id FROM panel_staff_schedules WHERE id=:scheduleId LIMIT 1`,
+      { scheduleId },
+    );
+    if (!existingRows.length) {
+      return rep.code(404).send({ error: "SCHEDULE_NOT_FOUND" });
+    }
+
+    const actorId = getActorAdminId(req);
+
+    await q(
+      `UPDATE panel_staff_schedules
+          SET admin_id=:adminId,
+              shift_date=:shiftDate,
+              start_time=:startTime,
+              end_time=:endTime,
+              timezone=:timezone,
+              shift_type=:shiftType,
+              note=:note,
+              updated_by=:actorId
+        WHERE id=:scheduleId`,
+      {
+        scheduleId,
+        adminId: body.adminId,
+        shiftDate: body.shiftDate,
+        startTime: body.startTime,
+        endTime: body.endTime,
+        timezone: body.timezone || "UTC",
+        shiftType: body.shiftType || "support",
+        note: body.note || null,
+        actorId: actorId || null,
+      },
+    );
+
+    const rows = await q<PanelStaffScheduleRow>(
+      `SELECT s.id, s.admin_id, s.shift_date, s.start_time, s.end_time, s.timezone,
+              s.shift_type, s.note, s.created_by, creator.username AS created_by_username,
+              s.updated_by, updater.username AS updated_by_username, s.created_at, s.updated_at,
+              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title,
+              pa.role AS admin_role
+         FROM panel_staff_schedules s
+         JOIN panel_admin_users pa ON pa.id=s.admin_id
+         LEFT JOIN panel_admin_users creator ON creator.id=s.created_by
+         LEFT JOIN panel_admin_users updater ON updater.id=s.updated_by
+        WHERE s.id=:id
+        LIMIT 1`,
+      { id: scheduleId },
+    );
+
+    return {
+      ok: true,
+      schedule: rows[0] ? mapPanelStaffSchedule(rows[0]) : null,
+    };
+  });
+
+  app.delete("/v1/admin/staff/schedules/:scheduleId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelPermission(req, "manage_support");
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const { scheduleId } = z.object({ scheduleId: z.string().trim().min(3).max(64) }).parse(req.params);
+    const existingRows = await q<{ id: string }>(
+      `SELECT id FROM panel_staff_schedules WHERE id=:scheduleId LIMIT 1`,
+      { scheduleId },
+    );
+    if (!existingRows.length) {
+      return rep.code(404).send({ error: "SCHEDULE_NOT_FOUND" });
+    }
+
+    await q(
+      `DELETE FROM panel_staff_schedules WHERE id=:scheduleId`,
+      { scheduleId },
+    );
+    return { ok: true, removedScheduleId: scheduleId };
   });
 
   app.get("/v1/admin/staff", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
