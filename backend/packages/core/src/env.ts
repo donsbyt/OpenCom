@@ -1,10 +1,34 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { config } from "dotenv";
 import { z } from "zod";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+export const coreEnvFilePath = loadCoreEnv();
 
 const emptyToUndefined = (value: unknown) => {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   return trimmed.length ? trimmed : undefined;
 };
+
+function loadCoreEnv() {
+  const candidates = [
+    path.resolve(__dirname, "../.env"),
+    path.resolve(__dirname, "../../.env"),
+    path.resolve(__dirname, "../../../.env"),
+  ];
+
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue;
+    config({ path: candidate });
+    return candidate;
+  }
+
+  return null;
+}
 
 const boolFlag = z.preprocess(
   (value) => {

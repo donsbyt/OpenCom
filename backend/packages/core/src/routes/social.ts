@@ -921,16 +921,31 @@ export async function socialRoutes(
     rep.header("Content-Type", attachment.content_type || "application/octet-stream");
     rep.header("Content-Disposition", `inline; filename="${attachment.file_name || "attachment"}"`);
 
+    let s3ReadFailed = false;
     if (isS3StorageEnabled()) {
-      const objectStream = await getObjectStreamFromStorage("social-dms", attachment.object_key);
-      if (!objectStream) return rep.code(404).send({ error: "FILE_MISSING" });
-      return rep.send(objectStream);
+      try {
+        const objectStream = await getObjectStreamFromStorage("social-dms", attachment.object_key);
+        if (objectStream) return rep.send(objectStream);
+        req.log.warn(
+          { attachmentId, objectKey: attachment.object_key },
+          "DM attachment missing from S3, falling back to local storage",
+        );
+      } catch (error) {
+        s3ReadFailed = true;
+        req.log.error(
+          { err: error, attachmentId, objectKey: attachment.object_key },
+          "Failed to read DM attachment from S3, falling back to local storage",
+        );
+      }
     }
 
     const rootDir = socialDmRootDir;
     const absPath = path.resolve(rootDir, attachment.object_key);
     if (!absPath.startsWith(rootDir + path.sep)) return rep.code(400).send({ error: "BAD_FILE_PATH" });
-    if (!fs.existsSync(absPath)) return rep.code(404).send({ error: "FILE_MISSING" });
+    if (!fs.existsSync(absPath)) {
+      if (s3ReadFailed) return rep.code(502).send({ error: "ATTACHMENT_READ_FAILED" });
+      return rep.code(404).send({ error: "FILE_MISSING" });
+    }
     return rep.send(fs.createReadStream(absPath));
   });
 

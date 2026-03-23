@@ -8,26 +8,11 @@ import {
 } from "@aws-sdk/client-s3";
 import { env } from "./env.js";
 
-const s3Enabled = env.STORAGE_PROVIDER === "s3";
-
-const s3Client = s3Enabled
-  ? new S3Client({
-      region: env.S3_REGION,
-      endpoint: env.S3_ENDPOINT,
-      forcePathStyle: env.S3_FORCE_PATH_STYLE,
-      credentials: env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY
-        ? {
-            accessKeyId: env.S3_ACCESS_KEY_ID,
-            secretAccessKey: env.S3_SECRET_ACCESS_KEY,
-          }
-        : undefined,
-    })
-  : null;
-
 const s3KeyPrefix = normalizePrefix(env.S3_KEY_PREFIX || "");
+let s3Client: S3Client | null | undefined;
 
 export function isS3StorageEnabled() {
-  return s3Enabled;
+  return env.STORAGE_PROVIDER === "s3";
 }
 
 export async function uploadFileToObjectStorage(
@@ -36,15 +21,46 @@ export async function uploadFileToObjectStorage(
   absoluteFilePath: string,
   contentType?: string,
 ) {
-  if (!s3Client) return;
-  await s3Client.send(
-    new PutObjectCommand({
-      Bucket: env.CORE_S3_BUCKET,
-      Key: resolveS3Key(namespace, objectKey),
-      Body: fs.createReadStream(absoluteFilePath),
-      ContentType: contentType,
-    }),
-  );
+  const client = getS3Client();
+  if (!client) return;
+
+  const key = resolveS3Key(namespace, objectKey);
+  const baseMeta = {
+    bucket: env.CORE_S3_BUCKET,
+    key,
+    absoluteFilePath,
+    contentType: contentType || null,
+  };
+  let sizeBytes = 0;
+
+  try {
+    const stat = await fs.promises.stat(absoluteFilePath);
+    sizeBytes = stat.size;
+  } catch (error) {
+    console.error("[core:s3] put_object:failed", { ...baseMeta, error });
+    throw error;
+  }
+
+  const meta = {
+    ...baseMeta,
+    sizeBytes,
+  };
+
+  console.info("[core:s3] put_object:start", meta);
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: env.CORE_S3_BUCKET,
+        Key: key,
+        Body: fs.createReadStream(absoluteFilePath),
+        ContentType: contentType,
+      }),
+    );
+    console.info("[core:s3] put_object:success", meta);
+  } catch (error) {
+    console.error("[core:s3] put_object:failed", { ...meta, error });
+    throw error;
+  }
 }
 
 export async function uploadBufferToObjectStorage(
@@ -53,24 +69,42 @@ export async function uploadBufferToObjectStorage(
   body: Buffer,
   contentType?: string,
 ) {
-  if (!s3Client) return;
-  await s3Client.send(
-    new PutObjectCommand({
-      Bucket: env.CORE_S3_BUCKET,
-      Key: resolveS3Key(namespace, objectKey),
-      Body: body,
-      ContentType: contentType,
-    }),
-  );
+  const client = getS3Client();
+  if (!client) return;
+
+  const key = resolveS3Key(namespace, objectKey);
+  const meta = {
+    bucket: env.CORE_S3_BUCKET,
+    key,
+    contentType: contentType || null,
+    sizeBytes: body.length,
+  };
+
+  console.info("[core:s3] put_object:start", meta);
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: env.CORE_S3_BUCKET,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+      }),
+    );
+    console.info("[core:s3] put_object:success", meta);
+  } catch (error) {
+    console.error("[core:s3] put_object:failed", { ...meta, error });
+    throw error;
+  }
 }
 
 export async function getObjectStreamFromStorage(
   namespace: string,
   objectKey: string,
 ): Promise<Readable | null> {
-  if (!s3Client) return null;
+  const client = getS3Client();
+  if (!client) return null;
   try {
-    const result = await s3Client.send(
+    const result = await client.send(
       new GetObjectCommand({
         Bucket: env.CORE_S3_BUCKET,
         Key: resolveS3Key(namespace, objectKey),
@@ -84,9 +118,10 @@ export async function getObjectStreamFromStorage(
 }
 
 export async function deleteObjectFromStorage(namespace: string, objectKey: string) {
-  if (!s3Client) return;
+  const client = getS3Client();
+  if (!client) return;
   try {
-    await s3Client.send(
+    await client.send(
       new DeleteObjectCommand({
         Bucket: env.CORE_S3_BUCKET,
         Key: resolveS3Key(namespace, objectKey),
@@ -105,6 +140,24 @@ function resolveS3Key(namespace: string, objectKey: string) {
 
 function normalizePrefix(value: string) {
   return String(value || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function getS3Client() {
+  if (!isS3StorageEnabled()) return null;
+  if (s3Client !== undefined) return s3Client;
+
+  s3Client = new S3Client({
+    region: env.S3_REGION,
+    endpoint: env.S3_ENDPOINT,
+    forcePathStyle: env.S3_FORCE_PATH_STYLE,
+    credentials: env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY
+      ? {
+          accessKeyId: env.S3_ACCESS_KEY_ID,
+          secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+        }
+      : undefined,
+  });
+  return s3Client;
 }
 
 function toReadable(value: unknown): Readable | null {

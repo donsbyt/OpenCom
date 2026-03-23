@@ -1,10 +1,3 @@
-import { config } from "dotenv";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-config({ path: path.resolve(__dirname, "../../../.env") });
-
 import { buildHttp } from "./http.js";
 import { authRoutes } from "./routes/auth.js";
 import { panelAuthRoutes } from "./routes/panelAuth.js";
@@ -30,7 +23,7 @@ import { FavouriteGifRoutes } from "./routes/FavouriteGifs.js";
 import { klipyRoutes } from "./routes/klipy.js";
 import { emoteRoutes } from "./routes/emotes.js";
 import { supportRoutes } from "./routes/support.js";
-import { env } from "./env.js";
+import { coreEnvFilePath, env } from "./env.js";
 import { makeRedis } from "./redis.js";
 import { presenceUpsert } from "./presence.js";
 import { CallRoutes } from "./routes/PrivateCalls.js";
@@ -83,6 +76,13 @@ process.once("SIGTERM", () => {
 });
 
 async function start() {
+  console.info("[core:storage] configuration", {
+    envFile: coreEnvFilePath,
+    provider: env.STORAGE_PROVIDER,
+    bucket: env.CORE_S3_BUCKET ?? null,
+    region: env.S3_REGION ?? null,
+  });
+
   const missingPrivateCallConfig = [
     ["OFFICIAL_NODE_BASE_URL", env.OFFICIAL_NODE_BASE_URL],
     ["OFFICIAL_NODE_SERVER_ID", env.OFFICIAL_NODE_SERVER_ID],
