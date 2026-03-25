@@ -18,6 +18,9 @@ Official OpenCom server extension that provides a compatibility layer for TeamSp
 - `/ts-compat-access allowMembers=<true|false>`
 - `/ts-compat-bridge-status`
 - `/ts-compat-bridge-config enabled=<true|false> url=<...> token=<...> timeoutMs=<...>`
+- `/ts-direct-bridge-status`
+- `/ts-direct-bridge-config enabled=<true|false> host=<...> queryPort=<10011> serverPort=<9987> username=<...> password=<...> categoryName=<teamspeak>`
+- `/ts-direct-bridge-sync`
 - `/ts-compat-install-url url=<https-url>`
 - `/ts-compat-import url=<https-url>`
 - `/ts-compat-install-json json="<pack-json>"`
@@ -51,6 +54,30 @@ Example local bridge:
 - `Extensions/Server/teamspeak-compat/examples/native-bridge-service.mjs`
 - Run: `node Extensions/Server/teamspeak-compat/examples/native-bridge-service.mjs`
 - Optional token: set `TS_NATIVE_BRIDGE_TOKEN`, then configure `token=...` in bridge config.
+
+## Direct TeamSpeak mirroring
+This extension can also connect to a TeamSpeak server directly over ServerQuery and mirror the TeamSpeak channel tree into your OpenCom server's default guild.
+
+What it does:
+- Creates or reuses a category named `teamspeak` by default.
+- Mirrors TeamSpeak channels as OpenCom voice channels under that category.
+- Keeps a binding map so later syncs update, create, or remove mirrored channels cleanly.
+
+Configure it:
+1. Enable the extension on the server.
+2. Set direct bridge config with a TeamSpeak ServerQuery account:
+   - `host`
+   - `queryPort` (usually `10011`)
+   - `serverPort` (usually `9987`) or `serverId`
+   - `username`
+   - `password`
+   - optional `categoryName`
+3. Run `/ts-direct-bridge-sync` to do the first import.
+
+Notes:
+- The OpenCom node must be able to reach the TeamSpeak query port.
+- TeamSpeak channels are mirrored as OpenCom voice channels. Nested TeamSpeak channels are flattened into path-style names when needed.
+- The saved `syncIntervalSec` value is intended for client-side sync helpers; the extension runtime itself does not run a privileged background scheduler.
 
 ## Pack format
 Use `/ts-compat-template` to get a ready-to-edit JSON template. Minimal format:

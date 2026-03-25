@@ -347,6 +347,16 @@ export function App() {
   const [newServerBaseUrl, setNewServerBaseUrl] = useState("https://");
   const [newServerLogoUrl, setNewServerLogoUrl] = useState("");
   const [newServerBannerUrl, setNewServerBannerUrl] = useState("");
+  const [newServerTeamSpeakBridge, setNewServerTeamSpeakBridge] = useState({
+    enabled: false,
+    host: "",
+    queryPort: "10011",
+    serverPort: "9987",
+    username: "",
+    password: "",
+    categoryName: "teamspeak",
+    syncIntervalSec: "60",
+  });
   const [inviteServerId, setInviteServerId] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [inviteJoinUrl, setInviteJoinUrl] = useState("");
@@ -930,6 +940,7 @@ export function App() {
   const desktopSessionLoadedRef = useRef(false);
   const extensionPanelsRef = useRef([]);
   const serversRef = useRef([]);
+  const teamSpeakBridgeAutoSyncRef = useRef({});
   const dragEasterEggBufferRef = useRef("");
   const storageScope = me?.id || "anonymous";
 
@@ -1447,6 +1458,54 @@ export function App() {
     }, 30000);
     return () => window.clearInterval(timer);
   }, [accessToken, activeServerId]);
+
+  useEffect(() => {
+    const activeServer =
+      servers.find((server) => server.id === activeServerId) || null;
+    if (!accessToken || !activeServer) return;
+
+    const hasTeamSpeakSyncCommand = (serverExtensionCommands || []).some(
+      (command) =>
+        command?.name === "teamspeak-compat.ts-direct-bridge-sync",
+    );
+    if (!hasTeamSpeakSyncCommand) return;
+
+    let cancelled = false;
+    const syncNow = async () => {
+      const lastRunAt =
+        teamSpeakBridgeAutoSyncRef.current[activeServer.id] || 0;
+      if (Date.now() - lastRunAt < 45000) return;
+      teamSpeakBridgeAutoSyncRef.current[activeServer.id] = Date.now();
+      try {
+        await nodeApi(
+          activeServer.baseUrl,
+          `/v1/extensions/commands/${encodeURIComponent(
+            "teamspeak-compat.ts-direct-bridge-sync",
+          )}/execute`,
+          activeServer.membershipToken,
+          {
+            method: "POST",
+            body: JSON.stringify({ args: {} }),
+          },
+        );
+      } catch {
+        if (!cancelled) {
+          teamSpeakBridgeAutoSyncRef.current[activeServer.id] =
+            Date.now() - 30000;
+        }
+      }
+    };
+
+    syncNow().catch(() => {});
+    const timer = window.setInterval(() => {
+      syncNow().catch(() => {});
+    }, 60000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [accessToken, activeServerId, serverExtensionCommands, servers]);
 
   useEffect(() => {
     if (!accessToken || servers.length === 0) return;
@@ -8196,6 +8255,112 @@ export function App() {
     }
   }
 
+  function resetNewServerTeamSpeakBridge() {
+    setNewServerTeamSpeakBridge({
+      enabled: false,
+      host: "",
+      queryPort: "10011",
+      serverPort: "9987",
+      username: "",
+      password: "",
+      categoryName: "teamspeak",
+      syncIntervalSec: "60",
+    });
+  }
+
+  function buildNewServerTeamSpeakBridgeConfig() {
+    const queryPort = Math.max(
+      1,
+      Math.min(65535, Number.parseInt(newServerTeamSpeakBridge.queryPort, 10) || 10011),
+    );
+    const serverPort = Math.max(
+      1,
+      Math.min(65535, Number.parseInt(newServerTeamSpeakBridge.serverPort, 10) || 9987),
+    );
+    const syncIntervalSec = Math.max(
+      15,
+      Math.min(
+        900,
+        Number.parseInt(newServerTeamSpeakBridge.syncIntervalSec, 10) || 60,
+      ),
+    );
+    return {
+      enabled: true,
+      host: newServerTeamSpeakBridge.host.trim(),
+      queryPort,
+      serverPort,
+      serverId: "",
+      username: newServerTeamSpeakBridge.username.trim(),
+      password: newServerTeamSpeakBridge.password,
+      categoryName:
+        newServerTeamSpeakBridge.categoryName.trim() || "teamspeak",
+      syncIntervalSec,
+      syncState: {
+        categoryChannelId: "",
+        channelBindings: [],
+        lastSyncedAt: "",
+        lastServerName: "",
+        lastError: "",
+        mirroredChannelCount: 0,
+      },
+    };
+  }
+
+  async function configureTeamSpeakBridgeForServer(serverId, serverBaseUrl) {
+    const directBridge = buildNewServerTeamSpeakBridgeConfig();
+    await api(
+      `/v1/servers/${serverId}/extensions/${encodeURIComponent("teamspeak-compat")}`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ enabled: true }),
+      },
+    );
+    await api(
+      `/v1/servers/${serverId}/extensions/${encodeURIComponent("teamspeak-compat")}/config`,
+      {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          mode: "patch",
+          config: {
+            directBridge,
+          },
+        }),
+      },
+    );
+    const membership = await api(
+      `/v1/servers/${serverId}/membership-token`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    );
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await nodeApi(
+          serverBaseUrl,
+          `/v1/extensions/commands/${encodeURIComponent(
+            "teamspeak-compat.ts-direct-bridge-sync",
+          )}/execute`,
+          membership.membershipToken,
+          {
+            method: "POST",
+            body: JSON.stringify({ args: {} }),
+          },
+        );
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt >= 3) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 750));
+      }
+    }
+    if (lastError) throw lastError;
+  }
+
   async function createServer() {
     if (
       !newServerName.trim() ||
@@ -8203,8 +8368,19 @@ export function App() {
       !newServerLogoUrl.trim()
     )
       return;
+    if (
+      newServerTeamSpeakBridge.enabled &&
+      (!newServerTeamSpeakBridge.host.trim() ||
+        !newServerTeamSpeakBridge.username.trim() ||
+        !newServerTeamSpeakBridge.password)
+    ) {
+      setStatus(
+        "TeamSpeak bridge needs a host, ServerQuery username, and password.",
+      );
+      return;
+    }
     try {
-      await api("/v1/servers", {
+      const created = await api("/v1/servers", {
         method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({
@@ -8214,11 +8390,26 @@ export function App() {
           bannerUrl: normalizeImageUrlInput(newServerBannerUrl) || null,
         }),
       });
+      let statusMessage = "Server provider added.";
+      if (newServerTeamSpeakBridge.enabled && created?.serverId) {
+        try {
+          await configureTeamSpeakBridgeForServer(
+            created.serverId,
+            newServerBaseUrl.trim(),
+          );
+          statusMessage =
+            "Server provider added and TeamSpeak mirror synced.";
+        } catch (bridgeError) {
+          statusMessage =
+            `Server provider added, but TeamSpeak mirror setup failed: ${bridgeError?.message || "UNKNOWN_ERROR"}`;
+        }
+      }
       setNewServerName("");
       setNewServerBaseUrl("https://");
       setNewServerLogoUrl("");
       setNewServerBannerUrl("");
-      setStatus("Server provider added.");
+      resetNewServerTeamSpeakBridge();
+      setStatus(statusMessage);
       const refreshed = await api("/v1/servers", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
@@ -14531,6 +14722,8 @@ export function App() {
         setNewServerBaseUrl={setNewServerBaseUrl}
         newServerLogoUrl={newServerLogoUrl}
         setNewServerLogoUrl={setNewServerLogoUrl}
+        newServerTeamSpeakBridge={newServerTeamSpeakBridge}
+        setNewServerTeamSpeakBridge={setNewServerTeamSpeakBridge}
         onImageFieldUpload={onImageFieldUpload}
         newServerBannerUrl={newServerBannerUrl}
         setNewServerBannerUrl={setNewServerBannerUrl}
@@ -14732,6 +14925,7 @@ export function App() {
               newServerBaseUrl,
               newServerLogoUrl,
               newServerBannerUrl,
+              newServerTeamSpeakBridge,
               newChannelName,
               newChannelType,
               newChannelParentId,
@@ -14746,6 +14940,7 @@ export function App() {
               setNewServerBaseUrl,
               setNewServerLogoUrl,
               setNewServerBannerUrl,
+              setNewServerTeamSpeakBridge,
               createServer,
               updateActiveServerVoiceGatewayPref,
               setNewChannelName,

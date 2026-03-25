@@ -25,6 +25,7 @@ export function ServerSettingsSection({ serverState, forms, actions }) {
     newServerBaseUrl,
     newServerLogoUrl,
     newServerBannerUrl,
+    newServerTeamSpeakBridge,
     newChannelName,
     newChannelType,
     newChannelParentId,
@@ -40,6 +41,7 @@ export function ServerSettingsSection({ serverState, forms, actions }) {
     setNewServerBaseUrl,
     setNewServerLogoUrl,
     setNewServerBannerUrl,
+    setNewServerTeamSpeakBridge,
     createServer,
     updateActiveServerVoiceGatewayPref,
     setNewChannelName,
@@ -167,12 +169,115 @@ export function ServerSettingsSection({ serverState, forms, actions }) {
             }
           />
         </label>
+        <label
+          style={{
+            display: "flex",
+            gap: "0.6rem",
+            alignItems: "center",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!newServerTeamSpeakBridge?.enabled}
+            onChange={(event) =>
+              setNewServerTeamSpeakBridge((current) => ({
+                ...current,
+                enabled: event.target.checked,
+              }))
+            }
+          />
+          <span>Mirror a TeamSpeak server into this host</span>
+        </label>
+        {newServerTeamSpeakBridge?.enabled && (
+          <>
+            <p className="hint">
+              TeamSpeak mirroring uses ServerQuery from the OpenCom node.
+            </p>
+            <input
+              placeholder="TeamSpeak host or IP"
+              value={newServerTeamSpeakBridge?.host ?? ""}
+              onChange={(event) =>
+                setNewServerTeamSpeakBridge((current) => ({
+                  ...current,
+                  host: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="Query port"
+              value={newServerTeamSpeakBridge?.queryPort ?? "10011"}
+              onChange={(event) =>
+                setNewServerTeamSpeakBridge((current) => ({
+                  ...current,
+                  queryPort: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="Server port"
+              value={newServerTeamSpeakBridge?.serverPort ?? "9987"}
+              onChange={(event) =>
+                setNewServerTeamSpeakBridge((current) => ({
+                  ...current,
+                  serverPort: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="ServerQuery username"
+              value={newServerTeamSpeakBridge?.username ?? ""}
+              onChange={(event) =>
+                setNewServerTeamSpeakBridge((current) => ({
+                  ...current,
+                  username: event.target.value,
+                }))
+              }
+            />
+            <input
+              type="password"
+              placeholder="ServerQuery password"
+              value={newServerTeamSpeakBridge?.password ?? ""}
+              onChange={(event) =>
+                setNewServerTeamSpeakBridge((current) => ({
+                  ...current,
+                  password: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="OpenCom category name"
+              value={newServerTeamSpeakBridge?.categoryName ?? "teamspeak"}
+              onChange={(event) =>
+                setNewServerTeamSpeakBridge((current) => ({
+                  ...current,
+                  categoryName: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="Sync interval (sec)"
+              value={newServerTeamSpeakBridge?.syncIntervalSec ?? "60"}
+              onChange={(event) =>
+                setNewServerTeamSpeakBridge((current) => ({
+                  ...current,
+                  syncIntervalSec: event.target.value,
+                }))
+              }
+            />
+          </>
+        )}
         <button
           onClick={createServer}
           disabled={
             !newServerName.trim() ||
             !newServerBaseUrl.trim() ||
-            !newServerLogoUrl.trim()
+            !newServerLogoUrl.trim() ||
+            !!(
+              newServerTeamSpeakBridge?.enabled &&
+              (!newServerTeamSpeakBridge?.host?.trim() ||
+                !newServerTeamSpeakBridge?.username?.trim() ||
+                !newServerTeamSpeakBridge?.password)
+            )
           }
         >
           Add Server

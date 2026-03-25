@@ -7,6 +7,7 @@ import {
   optionNumber,
   optionString
 } from "../../lib/opencom-extension-sdk.js";
+import net from "node:net";
 import { inflateRawSync } from "node:zlib";
 
 const PACK_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{1,63}$/;
@@ -27,6 +28,16 @@ const BRIDGE_ROUTE_PATTERN = /^\/[a-zA-Z0-9/_-]{1,256}$/;
 const DEFAULT_BRIDGE_TIMEOUT_MS = 8_000;
 const MIN_BRIDGE_TIMEOUT_MS = 500;
 const MAX_BRIDGE_TIMEOUT_MS = 30_000;
+const DIRECT_BRIDGE_DEFAULT_QUERY_PORT = 10011;
+const DIRECT_BRIDGE_DEFAULT_SERVER_PORT = 9987;
+const DIRECT_BRIDGE_DEFAULT_SYNC_INTERVAL_SEC = 60;
+const DIRECT_BRIDGE_MIN_SYNC_INTERVAL_SEC = 15;
+const DIRECT_BRIDGE_MAX_SYNC_INTERVAL_SEC = 900;
+const DIRECT_BRIDGE_DEFAULT_CATEGORY_NAME = "teamspeak";
+const DIRECT_BRIDGE_MAX_CHANNELS = 256;
+const DIRECT_BRIDGE_MAX_BINDINGS = 384;
+const DIRECT_BRIDGE_SOCKET_TIMEOUT_MS = 10_000;
+const DIRECT_BRIDGE_MAX_BUFFER_CHARS = 256_000;
 const COMPAT_MANIFEST_FILE_BASENAMES = new Set([
   "opencom-compat.json",
   "teamspeak-compat.json",
@@ -291,6 +302,598 @@ function normalizeBridgeConfig(rawValue) {
     baseUrl,
     authToken: asString(source.authToken ?? source.token, 2048),
     timeoutMs: clampNumber(source.timeoutMs, MIN_BRIDGE_TIMEOUT_MS, MAX_BRIDGE_TIMEOUT_MS, DEFAULT_BRIDGE_TIMEOUT_MS)
+  };
+}
+
+function sanitizeOpenComChannelName(value, fallback = "teamspeak-channel") {
+  const collapsed = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return asString(collapsed, 64) || fallback;
+}
+
+function normalizeTeamSpeakHost(rawValue) {
+  const value = String(rawValue || "").trim().replace(/^\[|\]$/g, "");
+  if (!value) return "";
+  if (value.length > 255) throw new Error("TeamSpeak host is too long");
+  if (/[/?#\s]/.test(value)) throw new Error("TeamSpeak host is invalid");
+  return value;
+}
+
+function normalizeDirectBridgeState(rawValue) {
+  const source = asRecord(rawValue);
+  const bindingsInput = Array.isArray(source.channelBindings) ? source.channelBindings : [];
+  const bindings = [];
+  for (const rawBinding of bindingsInput.slice(0, DIRECT_BRIDGE_MAX_BINDINGS)) {
+    const binding = asRecord(rawBinding);
+    const remoteChannelId = asString(binding.remoteChannelId, 64);
+    const channelId = asString(binding.channelId, 64);
+    if (!remoteChannelId || !channelId) continue;
+    bindings.push({
+      remoteChannelId,
+      channelId
+    });
+  }
+  return {
+    categoryChannelId: asString(source.categoryChannelId, 64),
+    channelBindings: bindings,
+    lastSyncedAt: asString(source.lastSyncedAt, 80),
+    lastServerName: asString(source.lastServerName, 160),
+    lastError: asString(source.lastError, 800),
+    mirroredChannelCount: clampNumber(source.mirroredChannelCount, 0, DIRECT_BRIDGE_MAX_CHANNELS, bindings.length)
+  };
+}
+
+function normalizeDirectBridgeConfig(rawValue) {
+  const source = asRecord(rawValue);
+  let host = "";
+  if (source.host != null && String(source.host).trim()) {
+    host = normalizeTeamSpeakHost(source.host);
+  }
+  const queryPort = clampNumber(source.queryPort, 1, 65535, DIRECT_BRIDGE_DEFAULT_QUERY_PORT);
+  const serverPort = clampNumber(
+    source.serverPort ?? source.virtualServerPort,
+    1,
+    65535,
+    DIRECT_BRIDGE_DEFAULT_SERVER_PORT
+  );
+  return {
+    enabled: Boolean(source.enabled),
+    host,
+    queryPort,
+    serverPort,
+    serverId: asString(source.serverId ?? source.virtualServerId, 32),
+    username: asString(source.username ?? source.clientLoginName, 120),
+    password: asString(source.password ?? source.clientLoginPassword, 256),
+    categoryName: sanitizeOpenComChannelName(
+      source.categoryName,
+      DIRECT_BRIDGE_DEFAULT_CATEGORY_NAME
+    ),
+    syncIntervalSec: clampNumber(
+      source.syncIntervalSec,
+      DIRECT_BRIDGE_MIN_SYNC_INTERVAL_SEC,
+      DIRECT_BRIDGE_MAX_SYNC_INTERVAL_SEC,
+      DIRECT_BRIDGE_DEFAULT_SYNC_INTERVAL_SEC
+    ),
+    syncState: normalizeDirectBridgeState(source.syncState)
+  };
+}
+
+function ensureDirectBridgeConfigured(directBridge) {
+  if (!directBridge.enabled) {
+    throw new Error("Direct TeamSpeak bridge is disabled.");
+  }
+  if (!directBridge.host) throw new Error("TeamSpeak host is required.");
+  if (!directBridge.username) throw new Error("TeamSpeak username is required.");
+  if (!directBridge.password) throw new Error("TeamSpeak password is required.");
+  if (!directBridge.serverId && !directBridge.serverPort) {
+    throw new Error("TeamSpeak server port or server id is required.");
+  }
+}
+
+function encodeTeamSpeakQueryValue(value) {
+  return String(value ?? "")
+    .replace(/\\/g, "\\\\")
+    .replace(/\//g, "\\/")
+    .replace(/\|/g, "\\p")
+    .replace(/ /g, "\\s")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+function decodeTeamSpeakQueryValue(value) {
+  return String(value ?? "").replace(/\\([\\\/psnrtabfv])/g, (_, token) => {
+    switch (token) {
+      case "\\":
+        return "\\";
+      case "/":
+        return "/";
+      case "p":
+        return "|";
+      case "s":
+        return " ";
+      case "n":
+        return "\n";
+      case "r":
+        return "\r";
+      case "t":
+        return "\t";
+      case "a":
+        return "\u0007";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "v":
+        return "\v";
+      default:
+        return token;
+    }
+  });
+}
+
+function parseTeamSpeakFieldSegment(segment) {
+  const fields = {};
+  const tokens = String(segment || "").trim().split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    const idx = token.indexOf("=");
+    if (idx <= 0) continue;
+    const key = decodeTeamSpeakQueryValue(token.slice(0, idx));
+    const value = decodeTeamSpeakQueryValue(token.slice(idx + 1));
+    fields[key] = value;
+  }
+  return fields;
+}
+
+function parseTeamSpeakRecordLines(lines) {
+  const rows = [];
+  for (const rawLine of lines || []) {
+    const line = String(rawLine || "").trim();
+    if (!line) continue;
+    for (const segment of line.split("|")) {
+      const parsed = parseTeamSpeakFieldSegment(segment);
+      if (Object.keys(parsed).length) rows.push(parsed);
+    }
+  }
+  return rows;
+}
+
+function parseTeamSpeakErrorLine(rawLine) {
+  const fields = parseTeamSpeakFieldSegment(String(rawLine || "").replace(/^error\s+/i, ""));
+  return {
+    id: Number(fields.id || 0),
+    message: asString(fields.msg || fields.message, 400) || "unknown error"
+  };
+}
+
+async function openTeamSpeakQueryClient(directBridge) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let closed = false;
+    let buffer = "";
+    const pending = [];
+    const socket = net.createConnection({
+      host: directBridge.host,
+      port: directBridge.queryPort
+    });
+
+    function rejectPending(error) {
+      while (pending.length) {
+        const entry = pending.shift();
+        entry.reject(error);
+      }
+    }
+
+    function handleFatal(error) {
+      const err = error instanceof Error ? error : new Error(String(error || "TEAMSPEAK_QUERY_FAILED"));
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+      rejectPending(err);
+    }
+
+    function finalizeResolve() {
+      if (settled) return;
+      settled = true;
+      resolve({
+        async execute(commandText) {
+          if (closed) throw new Error("TeamSpeak query client is closed.");
+          return new Promise((resolveCommand, rejectCommand) => {
+            pending.push({
+              lines: [],
+              resolve: resolveCommand,
+              reject: rejectCommand
+            });
+            socket.write(`${commandText}\n`);
+          });
+        },
+        close() {
+          if (closed) return;
+          closed = true;
+          socket.end();
+        }
+      });
+    }
+
+    function handleLine(rawLine) {
+      const line = String(rawLine || "").replace(/\r$/, "").trim();
+      if (!line) return;
+      const current = pending[0];
+      if (!current) return;
+      if (/^error\s+/i.test(line)) {
+        pending.shift();
+        const parsedError = parseTeamSpeakErrorLine(line);
+        if (parsedError.id !== 0) {
+          current.reject(new Error(`TEAMSPEAK_QUERY_${parsedError.id}: ${parsedError.message}`));
+          return;
+        }
+        current.resolve(current.lines);
+        return;
+      }
+      current.lines.push(line);
+    }
+
+    socket.setEncoding("utf8");
+    socket.setTimeout(DIRECT_BRIDGE_SOCKET_TIMEOUT_MS);
+    socket.on("connect", finalizeResolve);
+    socket.on("timeout", () => socket.destroy(new Error("TEAMSPEAK_QUERY_TIMEOUT")));
+    socket.on("error", handleFatal);
+    socket.on("close", () => rejectPending(new Error("TEAMSPEAK_QUERY_DISCONNECTED")));
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (buffer.length > DIRECT_BRIDGE_MAX_BUFFER_CHARS) {
+        socket.destroy(new Error("TEAMSPEAK_QUERY_RESPONSE_TOO_LARGE"));
+        return;
+      }
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        handleLine(line);
+        newlineIndex = buffer.indexOf("\n");
+      }
+    });
+  });
+}
+
+async function fetchDirectBridgeSnapshot(directBridge) {
+  ensureDirectBridgeConfigured(directBridge);
+  const client = await openTeamSpeakQueryClient(directBridge);
+  try {
+    await client.execute(
+      `login client_login_name=${encodeTeamSpeakQueryValue(directBridge.username)} ` +
+      `client_login_password=${encodeTeamSpeakQueryValue(directBridge.password)}`
+    );
+    if (directBridge.serverId) {
+      await client.execute(`use sid=${encodeTeamSpeakQueryValue(directBridge.serverId)}`);
+    } else {
+      await client.execute(`use port=${directBridge.serverPort}`);
+    }
+
+    const serverInfoRows = parseTeamSpeakRecordLines(await client.execute("serverinfo"));
+    const channelRows = parseTeamSpeakRecordLines(await client.execute("channellist -flags -voice -limits"));
+    const channels = channelRows
+      .map((rawChannel) => {
+        const channelId = asString(rawChannel.cid, 64);
+        if (!channelId) return null;
+        const name = sanitizeOpenComChannelName(
+          rawChannel.channel_name,
+          `teamspeak-${channelId}`
+        );
+        return {
+          channelId,
+          parentId: asString(rawChannel.pid, 64),
+          orderAfterId: asString(rawChannel.channel_order, 64),
+          name,
+          totalClients: clampNumber(rawChannel.total_clients, 0, 10_000, 0)
+        };
+      })
+      .filter(Boolean);
+    if (channels.length > DIRECT_BRIDGE_MAX_CHANNELS) {
+      throw new Error(`TeamSpeak server has too many channels to mirror (${channels.length} > ${DIRECT_BRIDGE_MAX_CHANNELS}).`);
+    }
+
+    return {
+      serverName: sanitizeOpenComChannelName(
+        serverInfoRows[0]?.virtualserver_name,
+        "TeamSpeak"
+      ),
+      channels
+    };
+  } finally {
+    await client.execute("quit").catch(() => {});
+    client.close();
+  }
+}
+
+function orderTeamSpeakSiblings(siblings) {
+  const byId = new Map(siblings.map((channel) => [channel.channelId, channel]));
+  const childrenByPrev = new Map();
+
+  for (const channel of siblings) {
+    const prevId = channel.orderAfterId && byId.has(channel.orderAfterId)
+      ? channel.orderAfterId
+      : "__root__";
+    const bucket = childrenByPrev.get(prevId) || [];
+    bucket.push(channel);
+    childrenByPrev.set(prevId, bucket);
+  }
+
+  for (const bucket of childrenByPrev.values()) {
+    bucket.sort((left, right) => {
+      const byName = left.name.localeCompare(right.name);
+      return byName || left.channelId.localeCompare(right.channelId);
+    });
+  }
+
+  const ordered = [];
+  const visited = new Set();
+
+  function appendChain(prevId) {
+    const bucket = childrenByPrev.get(prevId) || [];
+    for (const channel of bucket) {
+      if (visited.has(channel.channelId)) continue;
+      visited.add(channel.channelId);
+      ordered.push(channel);
+      appendChain(channel.channelId);
+    }
+  }
+
+  appendChain("__root__");
+  for (const channel of siblings) {
+    if (visited.has(channel.channelId)) continue;
+    visited.add(channel.channelId);
+    ordered.push(channel);
+    appendChain(channel.channelId);
+  }
+  return ordered;
+}
+
+function flattenTeamSpeakChannels(channels) {
+  const channelMap = new Map(channels.map((channel) => [channel.channelId, channel]));
+  const childrenByParent = new Map();
+
+  for (const channel of channels) {
+    const parentId = channel.parentId && channelMap.has(channel.parentId)
+      ? channel.parentId
+      : "__root__";
+    const bucket = childrenByParent.get(parentId) || [];
+    bucket.push(channel);
+    childrenByParent.set(parentId, bucket);
+  }
+
+  const ordered = [];
+
+  function visit(parentId, pathParts) {
+    const siblings = orderTeamSpeakSiblings(childrenByParent.get(parentId) || []);
+    for (const channel of siblings) {
+      const nextPath = [...pathParts, channel.name];
+      ordered.push({
+        ...channel,
+        displayName: sanitizeOpenComChannelName(
+          nextPath.join(" / "),
+          `teamspeak-${channel.channelId}`
+        )
+      });
+      visit(channel.channelId, nextPath);
+    }
+  }
+
+  visit("__root__", []);
+  return ordered;
+}
+
+async function getCurrentServerInfo(ctx) {
+  const payload = await ctx.apis.core.get("/v1/servers");
+  const servers = Array.isArray(payload?.servers) ? payload.servers : [];
+  return servers.find((server) => String(server?.id || "") === String(ctx.serverId)) || null;
+}
+
+async function saveDirectBridgeConfig(ctx, baseConfig, directBridge) {
+  const current = asRecord(await ctx.config.get().catch(() => baseConfig || {}));
+  const nextConfig = {
+    ...current,
+    directBridge
+  };
+  await ctx.config.set(nextConfig);
+  return nextConfig;
+}
+
+async function saveDirectBridgeFailure(ctx, runtime, directBridge, error) {
+  const nextDirectBridge = {
+    ...directBridge,
+    syncState: {
+      ...directBridge.syncState,
+      lastError: asString(error?.message || "Direct TeamSpeak bridge failed.", 800)
+    }
+  };
+  await saveDirectBridgeConfig(ctx, runtime.config, nextDirectBridge);
+}
+
+function buildDirectBridgeStatusLine(directBridge) {
+  if (!directBridge.enabled) return "disabled";
+  const target = directBridge.host
+    ? `${directBridge.host}:${directBridge.queryPort}`
+    : "(missing host)";
+  const lastSync = directBridge.syncState.lastSyncedAt
+    ? `, last sync ${directBridge.syncState.lastSyncedAt}`
+    : "";
+  return `enabled -> ${target}${lastSync}`;
+}
+
+async function syncDirectTeamSpeakBridge(ctx, runtime) {
+  const directBridge = normalizeDirectBridgeConfig(runtime.config.directBridge);
+  ensureDirectBridgeConfigured(directBridge);
+
+  const serverInfo = await getCurrentServerInfo(ctx);
+  const guildId = asString(serverInfo?.defaultGuildId ?? serverInfo?.default_guild_id, 64);
+  if (!guildId) {
+    throw new Error("This server has no default guild to mirror TeamSpeak into.");
+  }
+
+  const snapshot = await fetchDirectBridgeSnapshot(directBridge);
+  const flattenedChannels = flattenTeamSpeakChannels(snapshot.channels);
+  const currentChannelsPayload = await ctx.apis.node.get(`/v1/guilds/${guildId}/channels`);
+  const currentChannels = Array.isArray(currentChannelsPayload?.channels) ? currentChannelsPayload.channels : [];
+  const currentById = new Map(currentChannels.map((channel) => [String(channel.id), channel]));
+
+  let category = currentById.get(directBridge.syncState.categoryChannelId);
+  if (!category || category.type !== "category") {
+    category = currentChannels.find((channel) => channel.type === "category" && channel.name === directBridge.categoryName) || null;
+  }
+  if (!category) {
+    const createdCategory = await ctx.apis.node.post(`/v1/guilds/${guildId}/channels`, {
+      name: directBridge.categoryName,
+      type: "category",
+      syncPermissions: false
+    });
+    const categoryId = asString(createdCategory?.channelId, 64);
+    category = {
+      id: categoryId,
+      name: directBridge.categoryName,
+      type: "category",
+      position: currentChannels.reduce((max, channel) => Math.max(max, Number(channel.position) || 0), -1) + 1,
+      parent_id: null
+    };
+    currentById.set(category.id, category);
+  }
+
+  const bindingMap = new Map();
+  for (const binding of directBridge.syncState.channelBindings) {
+    const existingChannel = currentById.get(binding.channelId);
+    if (!existingChannel || existingChannel.type !== "voice") continue;
+    bindingMap.set(binding.remoteChannelId, binding.channelId);
+  }
+
+  const managedChannelIds = new Set(bindingMap.values());
+  const unmanagedMaxPosition = currentChannels.reduce((max, channel) => {
+    if (channel.id === category.id) return max;
+    if (managedChannelIds.has(channel.id)) return max;
+    return Math.max(max, Number(channel.position) || 0);
+  }, -1);
+  const categoryPosition = unmanagedMaxPosition + 1;
+  if (
+    category.name !== directBridge.categoryName
+    || Number(category.position) !== categoryPosition
+  ) {
+    await ctx.apis.node.patch(`/v1/channels/${category.id}`, {
+      name: directBridge.categoryName,
+      position: categoryPosition
+    });
+    category = {
+      ...category,
+      name: directBridge.categoryName,
+      position: categoryPosition
+    };
+  }
+
+  const unmatchedExisting = currentChannels.filter((channel) => (
+    channel.type === "voice"
+    && channel.parent_id === category.id
+    && !managedChannelIds.has(channel.id)
+  ));
+  const nextBindings = [];
+  const nextRemoteIds = new Set();
+  let createdCount = 0;
+  let updatedCount = 0;
+  let deletedCount = 0;
+
+  for (let index = 0; index < flattenedChannels.length; index += 1) {
+    const remoteChannel = flattenedChannels[index];
+    nextRemoteIds.add(remoteChannel.channelId);
+    const desiredPosition = categoryPosition + index + 1;
+    let openComChannelId = bindingMap.get(remoteChannel.channelId) || "";
+    let currentChannel = openComChannelId ? currentById.get(openComChannelId) : null;
+
+    if (!currentChannel) {
+      const adoptIndex = unmatchedExisting.findIndex((channel) => channel.name === remoteChannel.displayName);
+      if (adoptIndex >= 0) {
+        currentChannel = unmatchedExisting.splice(adoptIndex, 1)[0];
+        openComChannelId = String(currentChannel.id);
+      }
+    }
+
+    if (!currentChannel) {
+      const created = await ctx.apis.node.post(`/v1/guilds/${guildId}/channels`, {
+        name: remoteChannel.displayName,
+        type: "voice",
+        parentId: category.id,
+        position: desiredPosition,
+        syncPermissions: true
+      });
+      openComChannelId = asString(created?.channelId, 64);
+      currentChannel = {
+        id: openComChannelId,
+        name: remoteChannel.displayName,
+        type: "voice",
+        parent_id: category.id,
+        position: desiredPosition
+      };
+      currentById.set(openComChannelId, currentChannel);
+      createdCount += 1;
+    } else {
+      const needsUpdate = (
+        currentChannel.name !== remoteChannel.displayName
+        || currentChannel.parent_id !== category.id
+        || Number(currentChannel.position) !== desiredPosition
+      );
+      if (needsUpdate) {
+        await ctx.apis.node.patch(`/v1/channels/${openComChannelId}`, {
+          name: remoteChannel.displayName,
+          parentId: category.id,
+          position: desiredPosition,
+          syncPermissions: true
+        });
+        currentChannel = {
+          ...currentChannel,
+          name: remoteChannel.displayName,
+          parent_id: category.id,
+          position: desiredPosition
+        };
+        currentById.set(openComChannelId, currentChannel);
+        updatedCount += 1;
+      }
+    }
+
+    nextBindings.push({
+      remoteChannelId: remoteChannel.channelId,
+      channelId: openComChannelId
+    });
+  }
+
+  for (const binding of directBridge.syncState.channelBindings) {
+    if (nextRemoteIds.has(binding.remoteChannelId)) continue;
+    const staleChannel = currentById.get(binding.channelId);
+    if (!staleChannel || staleChannel.type !== "voice") continue;
+    if (staleChannel.parent_id !== category.id) continue;
+    await ctx.apis.node.del(`/v1/channels/${binding.channelId}`);
+    deletedCount += 1;
+  }
+
+  const nextDirectBridge = {
+    ...directBridge,
+    syncState: {
+      ...directBridge.syncState,
+      categoryChannelId: category.id,
+      channelBindings: nextBindings,
+      lastSyncedAt: new Date().toISOString(),
+      lastServerName: snapshot.serverName,
+      lastError: "",
+      mirroredChannelCount: nextBindings.length
+    }
+  };
+  await saveDirectBridgeConfig(ctx, runtime.config, nextDirectBridge);
+
+  return {
+    guildId,
+    categoryName: directBridge.categoryName,
+    serverName: snapshot.serverName,
+    mirroredChannelCount: nextBindings.length,
+    createdCount,
+    updatedCount,
+    deletedCount
   };
 }
 
@@ -763,7 +1366,8 @@ async function getRuntime(ctx) {
   const packMap = buildPackMap(config);
   const enabledPackIds = buildEnabledPackSet(config, packMap);
   const bridge = normalizeBridgeConfig(config.bridge);
-  return { config, sender, packMap, enabledPackIds, bridge };
+  const directBridge = normalizeDirectBridgeConfig(config.directBridge);
+  return { config, sender, packMap, enabledPackIds, bridge, directBridge };
 }
 
 async function canManageCompatibility(ctx) {
@@ -789,10 +1393,12 @@ function buildStatusSummary(runtime) {
   const bridgeState = runtime.bridge.enabled
     ? `enabled -> ${runtime.bridge.baseUrl || "(missing url)"}`
     : "disabled";
+  const directBridgeState = buildDirectBridgeStatusLine(runtime.directBridge);
   return [
     "TeamSpeak compatibility layer is active.",
     `Execution access: ${runAccess}.`,
     `Native bridge: ${bridgeState}.`,
+    `Direct TeamSpeak mirror: ${directBridgeState}.`,
     `Packs installed: ${runtime.packMap.size} (${remoteCount} remote).`,
     `Enabled packs: ${enabled.length ? enabled.join(", ") : "none"}.`,
     "Run commands with /ts-compat-run pack=<pack> command=<command> [args=\"key=value ...\"]"
@@ -1148,6 +1754,196 @@ export const commands = [
     }
   }),
   command({
+    name: "ts-direct-bridge-status",
+    description: "Show direct TeamSpeak mirror settings",
+    async execute(ctx) {
+      const runtime = await getRuntime(ctx);
+      const directBridge = runtime.directBridge;
+      const selection = directBridge.serverId
+        ? `sid=${directBridge.serverId}`
+        : `port=${directBridge.serverPort}`;
+      return commandResponse({
+        content: [
+          "Direct TeamSpeak mirror:",
+          `- enabled: ${directBridge.enabled ? "true" : "false"}`,
+          `- host: ${directBridge.host || "(not configured)"}`,
+          `- queryPort: ${directBridge.queryPort}`,
+          `- virtualServer: ${selection}`,
+          `- username: ${directBridge.username ? "(set)" : "(not configured)"}`,
+          `- password: ${directBridge.password ? "(set)" : "(not set)"}`,
+          `- categoryName: ${directBridge.categoryName}`,
+          `- syncIntervalSec: ${directBridge.syncIntervalSec}`,
+          `- lastServerName: ${directBridge.syncState.lastServerName || "(unknown)"}`,
+          `- lastSyncedAt: ${directBridge.syncState.lastSyncedAt || "(never)"}`,
+          `- mirroredChannels: ${directBridge.syncState.mirroredChannelCount}`,
+          `- lastError: ${directBridge.syncState.lastError || "(none)"}`
+        ].join("\n"),
+        sender: runtime.sender
+      });
+    }
+  }),
+  command({
+    name: "ts-direct-bridge-config",
+    description: "Configure direct TeamSpeak channel mirroring into the server",
+    options: [
+      optionBoolean("enabled", "Enable or disable direct TeamSpeak mirroring", false),
+      optionString("host", "TeamSpeak ServerQuery hostname or IP", false),
+      optionNumber("queryPort", "TeamSpeak ServerQuery port (default 10011)", false),
+      optionNumber("serverPort", "TeamSpeak virtual server port (default 9987)", false),
+      optionString("serverId", "Optional TeamSpeak virtual server id (sid)", false),
+      optionString("username", "TeamSpeak ServerQuery username", false),
+      optionString("password", "TeamSpeak ServerQuery password", false),
+      optionString("categoryName", "OpenCom category name for mirrored channels", false),
+      optionNumber("syncIntervalSec", "Suggested client-side sync interval in seconds", false),
+      optionBoolean("clearPassword", "Clear the saved TeamSpeak password", false),
+      optionBoolean("clearServerId", "Clear the saved TeamSpeak virtual server id", false)
+    ],
+    async execute(ctx) {
+      const runtime = await getRuntime(ctx);
+      const denied = await requireManager(ctx, runtime.sender, "configure direct TeamSpeak mirroring");
+      if (denied) return denied;
+
+      const nextDirectBridge = {
+        ...runtime.directBridge,
+        syncState: {
+          ...runtime.directBridge.syncState,
+          lastError: ""
+        }
+      };
+
+      if (typeof ctx.args?.enabled === "boolean") {
+        nextDirectBridge.enabled = ctx.args.enabled;
+      }
+      if (ctx.args?.host != null && String(ctx.args.host).trim()) {
+        try {
+          nextDirectBridge.host = normalizeTeamSpeakHost(ctx.args.host);
+        } catch (error) {
+          return commandResponse({
+            content: error?.message || "Invalid TeamSpeak host",
+            sender: runtime.sender
+          });
+        }
+      }
+      if (ctx.args?.queryPort != null) {
+        nextDirectBridge.queryPort = clampNumber(
+          ctx.args.queryPort,
+          1,
+          65535,
+          DIRECT_BRIDGE_DEFAULT_QUERY_PORT
+        );
+      }
+      if (ctx.args?.serverPort != null) {
+        nextDirectBridge.serverPort = clampNumber(
+          ctx.args.serverPort,
+          1,
+          65535,
+          DIRECT_BRIDGE_DEFAULT_SERVER_PORT
+        );
+      }
+      if (ctx.args?.serverId != null && String(ctx.args.serverId).trim()) {
+        nextDirectBridge.serverId = asString(ctx.args.serverId, 32);
+      }
+      if (ctx.args?.username != null && String(ctx.args.username).trim()) {
+        nextDirectBridge.username = asString(ctx.args.username, 120);
+      }
+      if (ctx.args?.password != null && String(ctx.args.password).trim()) {
+        nextDirectBridge.password = asString(ctx.args.password, 256);
+      }
+      if (ctx.args?.categoryName != null && String(ctx.args.categoryName).trim()) {
+        nextDirectBridge.categoryName = sanitizeOpenComChannelName(
+          ctx.args.categoryName,
+          DIRECT_BRIDGE_DEFAULT_CATEGORY_NAME
+        );
+      }
+      if (ctx.args?.syncIntervalSec != null) {
+        nextDirectBridge.syncIntervalSec = clampNumber(
+          ctx.args.syncIntervalSec,
+          DIRECT_BRIDGE_MIN_SYNC_INTERVAL_SEC,
+          DIRECT_BRIDGE_MAX_SYNC_INTERVAL_SEC,
+          DIRECT_BRIDGE_DEFAULT_SYNC_INTERVAL_SEC
+        );
+      }
+      if (ctx.args?.clearPassword === true) nextDirectBridge.password = "";
+      if (ctx.args?.clearServerId === true) nextDirectBridge.serverId = "";
+
+      await saveDirectBridgeConfig(ctx, runtime.config, nextDirectBridge);
+
+      const summaryLines = [
+        "Updated direct TeamSpeak mirror settings.",
+        `- enabled: ${nextDirectBridge.enabled ? "true" : "false"}`,
+        `- host: ${nextDirectBridge.host || "(not configured)"}`,
+        `- queryPort: ${nextDirectBridge.queryPort}`,
+        `- virtualServer: ${nextDirectBridge.serverId ? `sid=${nextDirectBridge.serverId}` : `port=${nextDirectBridge.serverPort}`}`,
+        `- username: ${nextDirectBridge.username ? "(set)" : "(not configured)"}`,
+        `- password: ${nextDirectBridge.password ? "(set)" : "(not set)"}`,
+        `- categoryName: ${nextDirectBridge.categoryName}`,
+        `- syncIntervalSec: ${nextDirectBridge.syncIntervalSec}`
+      ];
+
+      if (
+        nextDirectBridge.enabled
+        && nextDirectBridge.host
+        && nextDirectBridge.username
+        && nextDirectBridge.password
+      ) {
+        try {
+          const syncResult = await syncDirectTeamSpeakBridge(ctx, {
+            ...runtime,
+            config: {
+              ...runtime.config,
+              directBridge: nextDirectBridge
+            }
+          });
+          summaryLines.push(
+            "",
+            `Initial sync complete for ${syncResult.serverName}.`,
+            `- mirroredChannels: ${syncResult.mirroredChannelCount}`,
+            `- created: ${syncResult.createdCount}`,
+            `- updated: ${syncResult.updatedCount}`,
+            `- deleted: ${syncResult.deletedCount}`
+          );
+        } catch (error) {
+          await saveDirectBridgeFailure(ctx, runtime, nextDirectBridge, error).catch(() => {});
+          summaryLines.push("", `Initial sync failed: ${error?.message || "UNKNOWN_ERROR"}`);
+        }
+      }
+
+      return commandResponse({
+        content: summaryLines.join("\n"),
+        sender: runtime.sender
+      });
+    }
+  }),
+  command({
+    name: "ts-direct-bridge-sync",
+    description: "Sync TeamSpeak channels into the server's teamspeak category now",
+    async execute(ctx) {
+      const runtime = await getRuntime(ctx);
+      const denied = await requireManager(ctx, runtime.sender, "sync TeamSpeak mirrored channels");
+      if (denied) return denied;
+
+      try {
+        const result = await syncDirectTeamSpeakBridge(ctx, runtime);
+        return commandResponse({
+          content: [
+            `Mirrored ${result.mirroredChannelCount} TeamSpeak channels from '${result.serverName}'.`,
+            `Category: ${result.categoryName}`,
+            `Created: ${result.createdCount}`,
+            `Updated: ${result.updatedCount}`,
+            `Deleted: ${result.deletedCount}`
+          ].join("\n"),
+          sender: runtime.sender
+        });
+      } catch (error) {
+        await saveDirectBridgeFailure(ctx, runtime, runtime.directBridge, error).catch(() => {});
+        return commandResponse({
+          content: `TeamSpeak mirror sync failed: ${error?.message || "UNKNOWN_ERROR"}`,
+          sender: runtime.sender
+        });
+      }
+    }
+  }),
+  command({
     name: "ts-compat-install-url",
     description: "Install a compatibility pack from URL (JSON or TeamSpeak package archive)",
     options: [
@@ -1357,7 +2153,7 @@ export async function activate(ctx) {
   const runtime = await getRuntime(ctx);
   context.log(
     `Activated TeamSpeak compatibility layer for server ${ctx.serverId} ` +
-    `(packs=${runtime.packMap.size}, enabled=${runtime.enabledPackIds.size})`
+    `(packs=${runtime.packMap.size}, enabled=${runtime.enabledPackIds.size}, directMirror=${runtime.directBridge.enabled ? "on" : "off"})`
   );
 }
 
