@@ -16,9 +16,10 @@ const emptyToUndefined = (value: unknown) => {
 
 function loadCoreEnv() {
   const candidates = [
+    // Match the SMTP test script and prefer the backend root env file first.
+    path.resolve(__dirname, "../../../.env"),
     path.resolve(__dirname, "../.env"),
     path.resolve(__dirname, "../../.env"),
-    path.resolve(__dirname, "../../../.env"),
   ];
 
   for (const candidate of candidates) {
