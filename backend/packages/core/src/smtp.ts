@@ -83,11 +83,17 @@ function requireHeaderValue(name: string, value: string | undefined | null): str
   return normalized;
 }
 
+function requireBodyValue(name: string, value: string | undefined | null): string {
+  const normalized = String(value || "").trim();
+  if (!normalized) throw new Error(`SMTP_INVALID_${name.toUpperCase()}`);
+  return String(value || "");
+}
+
 function buildMailOptions(cfg: SmtpConfig, input: SendSmtpEmailInput) {
   const from = requireHeaderValue("from", input.from || cfg.from);
   const to = requireHeaderValue("to", input.to);
   const subject = requireHeaderValue("subject", input.subject);
-  const text = requireHeaderValue("text", input.text);
+  const text = requireBodyValue("text", input.text);
   const replyTo = input.replyTo ? requireHeaderValue("reply_to", input.replyTo) : undefined;
   const html = typeof input.html === "string" && input.html.trim() ? input.html : undefined;
 
