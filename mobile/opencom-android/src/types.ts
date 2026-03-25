@@ -302,11 +302,24 @@ export type PrivateCallCreateResult = {
 
 export type PrivateCallJoinResult = {
   success: boolean;
+  mediaToken?: string;
+  mediaWsUrl?: string;
+  roomId?: string;
   membershipToken?: string;
   nodeBaseUrl?: string;
   guildId?: string;
   channelId?: string;
   callId?: string;
+  error?: string | boolean;
+};
+
+export type VoiceMediaSessionResult = {
+  ok?: boolean;
+  guildId?: string;
+  channelId?: string;
+  roomId?: string;
+  mediaWsUrl?: string;
+  mediaToken?: string;
   error?: string | boolean;
 };
 

@@ -115,6 +115,12 @@ const Env = z.object({
   OFFICIAL_NODE_BASE_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
   /** Must match NODE_SERVER_ID on that node so the node accepts the membership token */
   OFFICIAL_NODE_SERVER_ID: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  MEDIA_SERVER_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  MEDIA_WS_URL: z.preprocess(emptyToUndefined, z.string().optional()),
+  MEDIA_TOKEN_SECRET: z.preprocess(emptyToUndefined, z.string().min(16).optional()),
+  MEDIA_TOKEN_ISSUER: z.string().default("opencom-media"),
+  MEDIA_TOKEN_AUDIENCE: z.preprocess(emptyToUndefined, z.string().optional()),
+  MEDIA_TOKEN_TTL_SECONDS: z.coerce.number().default(300),
   /**
    * The ID of the system guild (is_system=1) that lives on the official node and is used
    * exclusively to host ephemeral voice channels for private (1:1) calls.
@@ -163,3 +169,41 @@ if (env.STORAGE_PROVIDER === "s3") {
     throw new Error("S3_REGION is required when STORAGE_PROVIDER=s3");
   }
 }
+
+function normalizeHttpBaseUrl(value: string | null | undefined): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeWsUrl(value: string | null | undefined): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "http:") parsed.protocol = "ws:";
+    if (parsed.protocol === "https:") parsed.protocol = "wss:";
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") return "";
+    parsed.pathname = "/gateway";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+export const resolvedMediaServerUrl = normalizeHttpBaseUrl(
+  env.MEDIA_SERVER_URL || env.OFFICIAL_NODE_BASE_URL,
+);
+export const resolvedMediaWsUrl = normalizeWsUrl(
+  env.MEDIA_WS_URL || env.MEDIA_SERVER_URL || env.OFFICIAL_NODE_BASE_URL,
+);

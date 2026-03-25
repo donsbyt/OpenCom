@@ -9,6 +9,8 @@ import {
   resolvedMediasoupAnnouncedAddress,
   resolvedMediasoupAnnouncedAddressKind,
   resolvedMediasoupAnnouncedAddressSource,
+  resolvedMediaServerUrl,
+  resolvedMediaWsUrl,
 } from "./env.js";
 import { initMediasoup } from "./voice/mediasoup.js";
 import { attachmentRoutes } from "./routes/attachments.js";
@@ -27,6 +29,7 @@ import { restorePersistedExtensions } from "./extensions/host.js";
 import { createLogger } from "./logger.js";
 import { emoteRoutes } from "./routes/emotes.js";
 import { privateCallChannelRoutes } from "./routes/privateCallChannels.js";
+import { mediaSessionRoutes } from "./routes/mediaSessions.js";
 
 const logger = createLogger("server");
 
@@ -35,6 +38,8 @@ logger.info("Starting node server", {
   logLevel: env.LOG_LEVEL,
   debugHttp: env.DEBUG_HTTP,
   debugVoice: env.DEBUG_VOICE,
+  mediaServerUrl: resolvedMediaServerUrl || "(unset)",
+  mediaWsUrl: resolvedMediaWsUrl || "(unset)",
   mediasoupAnnouncedAddress: resolvedMediasoupAnnouncedAddress || "(unset)",
   mediasoupAnnouncedAddressKind: resolvedMediasoupAnnouncedAddressKind,
   mediasoupAnnouncedAddressSource: resolvedMediasoupAnnouncedAddressSource || "(unset)",
@@ -96,6 +101,7 @@ await roleRoutes(app, gw.broadcastGuild);
 await overwriteRoutes(app, gw.broadcastGuild);
 await memberRoutes(app, gw.broadcastGuild);
 await meRoutes(app);
+await mediaSessionRoutes(app);
 await discordCompatRoutes(app);
 await extensionRoutes(app, gw.broadcastToChannel);
 

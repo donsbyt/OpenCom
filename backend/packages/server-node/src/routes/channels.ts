@@ -8,6 +8,11 @@ import { resolveChannelPermissions } from "../permissions/resolve.js";
 import { Perm, has } from "../permissions/bits.js";
 import { resolveCoreUserProfiles } from "../userDirectory.js";
 import { copyChannelOverwrites } from "../channelOverwrites.js";
+import {
+  syncMediaCloseRoom,
+  syncMediaDisconnectMember,
+  syncMediaVoiceMemberState,
+} from "../mediaSync.js";
 
 export async function channelRoutes(
   app: FastifyInstance,
@@ -293,6 +298,9 @@ export async function channelRoutes(
     }
 
     await q(`DELETE FROM channels WHERE id=:channelId`, { channelId });
+    if (ch[0].type === "voice") {
+      await syncMediaCloseRoom({ guildId, channelId });
+    }
     broadcastGuild(guildId, "CHANNEL_DELETE", { channelId });
     return rep.send({ ok: true });
   });
@@ -337,6 +345,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, userId, channelId, false, false)
     );
+    await syncMediaVoiceMemberState({ guildId, userId });
     return rep.send({ ok: true });
   });
 
@@ -362,6 +371,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, userId, null, false, false)
     );
+    await syncMediaDisconnectMember({ guildId, channelId, userId });
     return rep.send({ ok: true });
   });
 
@@ -400,6 +410,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, userId, channelId, !!updated?.muted, !!updated?.deafened)
     );
+    await syncMediaVoiceMemberState({ guildId, userId });
     return rep.send({ ok: true });
   });
 
@@ -466,6 +477,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, memberId, channelId, !!updated?.muted, !!updated?.deafened)
     );
+    await syncMediaVoiceMemberState({ guildId, userId: memberId });
     return rep.send({ ok: true, userId: memberId, channelId, muted: !!updated?.muted, deafened: !!updated?.deafened });
   });
 
@@ -512,6 +524,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, memberId, null, false, false)
     );
+    await syncMediaDisconnectMember({ guildId, channelId, userId: memberId });
     return rep.send({ ok: true, userId: memberId, channelId });
   });
 }

@@ -16,6 +16,7 @@ import type {
   PrivateCallStatusResult,
   Role,
   UserStatus,
+  VoiceMediaSessionResult,
   VoiceState,
 } from "./types";
 
@@ -634,6 +635,14 @@ export function createApiClient(input: {
       return nodeRequest<{ voiceStates: VoiceState[] }>(
         server,
         `/v1/guilds/${encodeURIComponent(guildId)}/voice-states`,
+      );
+    },
+
+    getVoiceMediaSession(server: CoreServer, channelId: string) {
+      return nodeRequest<VoiceMediaSessionResult>(
+        server,
+        `/v1/channels/${encodeURIComponent(channelId)}/media-session`,
+        { method: "POST", body: {} },
       );
     },
 

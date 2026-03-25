@@ -4,14 +4,17 @@
   "workspaces": [
     "packages/shared",
     "packages/core",
-    "packages/server-node"
+    "packages/server-node",
+    "packages/media"
   ],
   "scripts": {
-    "build": "npm -w @ods/shared run build && npm -w @ods/core run build && npm -w @ods/server-node run build",
+    "build": "npm -w @ods/shared run build && npm -w @ods/core run build && npm -w @ods/server-node run build && npm -w @ods/media run build",
     "dev:core": "npm -w @ods/core run dev",
     "dev:node": "npm -w @ods/server-node run dev",
+    "dev:media": "npm -w @ods/media run dev",
     "start:core": "bash -lc 'if pm2 describe opencom-core >/dev/null 2>&1; then pm2 restart opencom-core --update-env; else pm2 start packages/core/dist/core/src/index.js --name opencom-core --update-env; fi'",
     "start:node": "bash -lc 'if pm2 describe opencom-node >/dev/null 2>&1; then pm2 restart opencom-node --update-env; else pm2 start packages/server-node/dist/server-node/src/index.js --name opencom-node --update-env; fi'",
+    "start:media": "bash -lc 'if pm2 describe opencom-media >/dev/null 2>&1; then pm2 restart opencom-media --update-env; else pm2 start packages/media/dist/media/src/index.js --name opencom-media --update-env; fi'",
     "migrate:core": "npm -w @ods/core run migrate",
     "migrate:node": "npm -w @ods/server-node run migrate",
     "dev:voice-debug": "DEBUG_HTTP=1 DEBUG_VOICE=1 LOG_LEVEL=debug npm -w @ods/server-node run dev",

@@ -292,10 +292,9 @@ function DmChatScreenWrapper({
         const joined = await api.joinPrivateCall(created.call_id);
         if (
           !joined.success ||
-          !joined.membershipToken ||
-          !joined.nodeBaseUrl ||
           !joined.guildId ||
-          !joined.channelId
+          !joined.channelId ||
+          (!joined.mediaToken && !joined.membershipToken)
         ) {
           throw new Error("CALL_JOIN_FAILED");
         }
@@ -304,8 +303,11 @@ function DmChatScreenWrapper({
           mode: "private",
           callId: created.call_id,
           participantName: targetThread.name,
-          membershipToken: joined.membershipToken,
-          nodeBaseUrl: joined.nodeBaseUrl,
+          mediaToken: joined.mediaToken ?? null,
+          mediaWsUrl: joined.mediaWsUrl ?? null,
+          membershipToken: joined.membershipToken ?? null,
+          nodeBaseUrl: joined.nodeBaseUrl ?? null,
+          roomId: joined.roomId ?? null,
           guild: {
             id: joined.guildId,
             name: "Private Calls",
@@ -444,8 +446,11 @@ function VoiceRoomScreenWrapper({
     guild,
     channel,
     mode,
+    mediaToken,
+    mediaWsUrl,
     membershipToken,
     nodeBaseUrl,
+    roomId,
     callId,
     participantName,
   } = route.params as {
@@ -453,8 +458,11 @@ function VoiceRoomScreenWrapper({
     guild: Guild;
     channel: Channel;
     mode?: "server" | "private";
+    mediaToken?: string | null;
+    mediaWsUrl?: string | null;
     membershipToken?: string | null;
     nodeBaseUrl?: string | null;
+    roomId?: string | null;
     callId?: string;
     participantName?: string | null;
   };
@@ -465,8 +473,11 @@ function VoiceRoomScreenWrapper({
       guild={guild}
       channel={channel}
       mode={mode}
+      mediaToken={mediaToken}
+      mediaWsUrl={mediaWsUrl}
       membershipToken={membershipToken}
       nodeBaseUrl={nodeBaseUrl}
+      roomId={roomId}
       callId={callId}
       participantName={participantName}
       onBack={() => navigation.goBack()}
@@ -650,10 +661,9 @@ function AppContent() {
       const joined = await api.joinPrivateCall(call.callId);
       if (
         !joined.success ||
-        !joined.membershipToken ||
-        !joined.nodeBaseUrl ||
         !joined.guildId ||
-        !joined.channelId
+        !joined.channelId ||
+        (!joined.mediaToken && !joined.membershipToken)
       ) {
         return false;
       }
@@ -662,8 +672,11 @@ function AppContent() {
         mode: "private",
         callId: call.callId,
         participantName: call.callerName,
-        membershipToken: joined.membershipToken,
-        nodeBaseUrl: joined.nodeBaseUrl,
+        mediaToken: joined.mediaToken ?? null,
+        mediaWsUrl: joined.mediaWsUrl ?? null,
+        membershipToken: joined.membershipToken ?? null,
+        nodeBaseUrl: joined.nodeBaseUrl ?? null,
+        roomId: joined.roomId ?? null,
         guild: {
           id: joined.guildId,
           name: "Private Calls",

@@ -1,8 +1,12 @@
 import { q } from "../db.js";
 import type { FastifyInstance } from "fastify";
 import { ulidLike } from "@ods/shared/ids.js";
+import {
+  buildMediaRoomId,
+  signMediaAccessToken,
+} from "@ods/shared/mediaToken.js";
 import crypto from "crypto";
-import { env } from "../env.js";
+import { env, resolvedMediaWsUrl } from "../env.js";
 import { signMembershipToken } from "../membershipToken.js";
 import { isOfficialAccountUserId } from "../officialAccount.js";
 import { sendMobilePushToUser } from "../pushNotifications.js";
@@ -616,8 +620,32 @@ export async function CallRoutes(
       nodeServerId      // core_server_id matches guild.server_id
     );
 
+    const mediaToken = env.MEDIA_TOKEN_SECRET && resolvedMediaWsUrl
+      ? await signMediaAccessToken({
+          secret: env.MEDIA_TOKEN_SECRET,
+          issuer: env.MEDIA_TOKEN_ISSUER,
+          ...(env.MEDIA_TOKEN_AUDIENCE
+            ? { audience: env.MEDIA_TOKEN_AUDIENCE }
+            : {}),
+          expiresInSeconds: env.MEDIA_TOKEN_TTL_SECONDS,
+          userId,
+          serverId: nodeServerId,
+          coreServerId: nodeServerId,
+          guildId: call.guild_id,
+          channelId: call.channel_id,
+          roles: ["user"],
+          permissions: ["connect", "speak"],
+          platformRole: "user",
+          privateCallId: call.id,
+          scope: "voice",
+        })
+      : null;
+
     return rep.send({
       success: true,
+      mediaToken,
+      mediaWsUrl: mediaToken ? resolvedMediaWsUrl : null,
+      roomId: buildMediaRoomId(call.guild_id, call.channel_id),
       membershipToken,
       nodeBaseUrl: call.node_base_url,
       guildId: call.guild_id,

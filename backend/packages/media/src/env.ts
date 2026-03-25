@@ -11,54 +11,43 @@ const boolFlag = z.preprocess(
   (value) => {
     if (typeof value === "boolean") return value;
     if (typeof value === "number") return value === 1;
-    if (typeof value === "string") return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+    if (typeof value === "string") {
+      return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+    }
     return false;
   },
-  z.boolean()
+  z.boolean(),
 );
 
 const Env = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  NODE_PORT: z.coerce.number().default(3002),
-  NODE_HOST: z.string().default("0.0.0.0"),
-  NODE_DATABASE_URL: z.string().min(1),
-  NODE_ID: z.string().min(1),
-
-  CORE_BASE_URL: z.string().url(),
-  CORE_JWKS_URL: z.string().url(),
-  NODE_SYNC_SECRET: z.preprocess(emptyToUndefined, z.string().min(16).optional()),
-
-  ATTACHMENT_MAX_BYTES: z.coerce.number().default(52428800),
-  ATTACHMENT_BOOST_MAX_BYTES: z.coerce.number().default(104857600),
-  ATTACHMENT_TTL_DAYS: z.coerce.number().default(365),
-  ATTACHMENT_STORAGE_DIR: z.string().default("./data/attachments"),
-  STORAGE_PROVIDER: z.enum(["local", "s3"]).default("local"),
-  NODE_S3_BUCKET: z.preprocess(
-    (value) => value ?? process.env.S3_BUCKET,
-    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  MEDIA_PORT: z.coerce.number().default(3003),
+  MEDIA_HOST: z.string().default("0.0.0.0"),
+  MEDIA_DATABASE_URL: z.preprocess(
+    (value) => value ?? process.env.NODE_DATABASE_URL,
+    z.string().min(1),
   ),
-  S3_REGION: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
-  S3_ENDPOINT: z.preprocess(emptyToUndefined, z.string().url().optional()),
-  S3_ACCESS_KEY_ID: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
-  S3_SECRET_ACCESS_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
-  S3_FORCE_PATH_STYLE: boolFlag.default(false),
-  S3_KEY_PREFIX: z.preprocess(emptyToUndefined, z.string().optional()),
-  PUBLIC_BASE_URL: z.string().url(),
-  NODE_SERVER_ID: z.string().min(1),
+  CORE_BASE_URL: z.string().url(),
   MEDIA_SERVER_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
   MEDIA_WS_URL: z.preprocess(emptyToUndefined, z.string().optional()),
-  MEDIA_TOKEN_SECRET: z.preprocess(emptyToUndefined, z.string().min(16).optional()),
-  MEDIA_TOKEN_ISSUER: z.string().default("opencom-media"),
+  MEDIA_ALLOWED_ORIGINS: z.preprocess(emptyToUndefined, z.string().optional()),
+  MEDIA_TOKEN_SECRET: z.string().min(16),
+  MEDIA_TOKEN_ISSUER: z.string().min(1).default("opencom-media"),
   MEDIA_TOKEN_AUDIENCE: z.preprocess(emptyToUndefined, z.string().optional()),
-  MEDIA_TOKEN_TTL_SECONDS: z.coerce.number().default(300),
   MEDIA_SYNC_SECRET: z.preprocess(
     (value) => value ?? process.env.NODE_SYNC_SECRET,
-    z.preprocess(emptyToUndefined, z.string().min(16).optional())
+    z.preprocess(emptyToUndefined, z.string().min(16).optional()),
   ),
 
   MEDIASOUP_LISTEN_IP: z.string().default("0.0.0.0"),
-  MEDIASOUP_ANNOUNCED_ADDRESS: z.preprocess(emptyToUndefined, z.string().optional()),
-  MEDIASOUP_ANNOUNCED_IP: z.preprocess(emptyToUndefined, z.string().optional()),
+  MEDIASOUP_ANNOUNCED_ADDRESS: z.preprocess(
+    emptyToUndefined,
+    z.string().optional(),
+  ),
+  MEDIASOUP_ANNOUNCED_IP: z.preprocess(
+    emptyToUndefined,
+    z.string().optional(),
+  ),
   MEDIASOUP_RTC_MIN_PORT: z.coerce.number().default(40000),
   MEDIASOUP_RTC_MAX_PORT: z.coerce.number().default(40100),
   MEDIASOUP_ENABLE_UDP: boolFlag.default(true),
@@ -69,22 +58,15 @@ const Env = z.object({
   LOG_DIR: z.string().default("./logs"),
   LOG_TO_FILE: boolFlag.default(true),
   DEBUG_HTTP: boolFlag.default(false),
-  DEBUG_VOICE: boolFlag.default(false)
+  DEBUG_VOICE: boolFlag.default(false),
 });
 
 export const env = Env.parse(process.env);
 
-if (env.STORAGE_PROVIDER === "s3") {
-  if (!env.NODE_S3_BUCKET) {
-    throw new Error("NODE_S3_BUCKET (or S3_BUCKET) is required when STORAGE_PROVIDER=s3");
-  }
-  if (!env.S3_REGION) {
-    throw new Error("S3_REGION is required when STORAGE_PROVIDER=s3");
-  }
-}
-
 if (env.MEDIASOUP_RTC_MIN_PORT > env.MEDIASOUP_RTC_MAX_PORT) {
-  throw new Error(`INVALID_MEDIASOUP_PORT_RANGE:${env.MEDIASOUP_RTC_MIN_PORT}>${env.MEDIASOUP_RTC_MAX_PORT}`);
+  throw new Error(
+    `INVALID_MEDIASOUP_PORT_RANGE:${env.MEDIASOUP_RTC_MIN_PORT}>${env.MEDIASOUP_RTC_MAX_PORT}`,
+  );
 }
 
 if (!env.MEDIASOUP_ENABLE_UDP && !env.MEDIASOUP_ENABLE_TCP) {
@@ -93,37 +75,6 @@ if (!env.MEDIASOUP_ENABLE_UDP && !env.MEDIASOUP_ENABLE_TCP) {
 
 function stripAddressBrackets(value: string) {
   return String(value || "").trim().replace(/^\[(.*)\]$/, "$1");
-}
-
-function normalizeHttpBaseUrl(value: string | null | undefined): string {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  try {
-    const parsed = new URL(raw);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "");
-  } catch {
-    return "";
-  }
-}
-
-function normalizeWsUrl(value: string | null | undefined): string {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  try {
-    const parsed = new URL(raw);
-    if (parsed.protocol === "http:") parsed.protocol = "ws:";
-    if (parsed.protocol === "https:") parsed.protocol = "wss:";
-    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") return "";
-    parsed.pathname = "/gateway";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "");
-  } catch {
-    return "";
-  }
 }
 
 function isLoopbackHostname(hostname: string) {
@@ -143,7 +94,9 @@ function isUnspecifiedHostname(hostname: string) {
 function isPrivateIpv4Address(address: string) {
   if (isIP(address) !== 4) return false;
   const octets = address.split(".").map((part) => Number(part));
-  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part))) return false;
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part))) {
+    return false;
+  }
   return octets[0] === 10
     || octets[0] === 127
     || octets[0] === 0
@@ -165,10 +118,85 @@ function isPrivateIpv6Address(address: string) {
     || normalized.startsWith("feb");
 }
 
+function normalizeHttpBaseUrl(value?: string | null) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeWsUrl(value?: string | null) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "http:") parsed.protocol = "ws:";
+    if (parsed.protocol === "https:") parsed.protocol = "wss:";
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") return "";
+    parsed.pathname = "/gateway";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeOrigin(value?: string | null) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (raw === "*") return "*";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    return parsed.origin;
+  } catch {
+    return "";
+  }
+}
+
+function parseAllowedOrigins(input?: string | null) {
+  const values = String(input || "")
+    .split(",")
+    .map((value) => normalizeOrigin(value))
+    .filter(Boolean);
+  return Array.from(new Set(values));
+}
+
+export const resolvedMediaServerUrl = normalizeHttpBaseUrl(env.MEDIA_SERVER_URL);
+export const resolvedMediaWsUrl = normalizeWsUrl(
+  env.MEDIA_WS_URL || resolvedMediaServerUrl,
+);
+export const mediaAllowedOrigins = parseAllowedOrigins(env.MEDIA_ALLOWED_ORIGINS);
+
+export function isMediaOriginAllowed(origin?: string | null) {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return true;
+  if (mediaAllowedOrigins.includes("*")) return true;
+  if (mediaAllowedOrigins.length) return mediaAllowedOrigins.includes(normalized);
+  if (env.NODE_ENV !== "production") {
+    try {
+      const parsed = new URL(normalized);
+      return isLoopbackHostname(parsed.hostname) || parsed.hostname.endsWith(".localhost");
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export type MediasoupAnnouncedAddressSource =
   | "MEDIASOUP_ANNOUNCED_ADDRESS"
   | "MEDIASOUP_ANNOUNCED_IP"
-  | "PUBLIC_BASE_URL"
+  | "MEDIA_SERVER_URL"
+  | "MEDIA_WS_URL"
   | null;
 
 export type MediasoupAnnouncedAddressKind =
@@ -197,21 +225,34 @@ function resolveMediasoupAnnouncedAddress(): ResolvedMediasoupAnnouncedAddress {
       source: "MEDIASOUP_ANNOUNCED_IP",
     };
   }
-  try {
-    const parsed = new URL(env.PUBLIC_BASE_URL);
-    if (isLoopbackHostname(parsed.hostname) || isUnspecifiedHostname(parsed.hostname)) {
-      return { address: undefined, source: null };
+
+  const candidates: Array<[string, MediasoupAnnouncedAddressSource]> = [
+    [resolvedMediaServerUrl, "MEDIA_SERVER_URL"],
+    [resolvedMediaWsUrl, "MEDIA_WS_URL"],
+  ];
+
+  for (const [value, source] of candidates) {
+    if (!value) continue;
+    try {
+      const parsed = new URL(value);
+      if (isLoopbackHostname(parsed.hostname) || isUnspecifiedHostname(parsed.hostname)) {
+        continue;
+      }
+      return {
+        address: parsed.hostname || undefined,
+        source: parsed.hostname ? source : null,
+      };
+    } catch {
+      continue;
     }
-    return {
-      address: parsed.hostname || undefined,
-      source: parsed.hostname ? "PUBLIC_BASE_URL" : null,
-    };
-  } catch {
-    return { address: undefined, source: null };
   }
+
+  return { address: undefined, source: null };
 }
 
-function classifyMediasoupAnnouncedAddress(address?: string): MediasoupAnnouncedAddressKind {
+function classifyMediasoupAnnouncedAddress(
+  address?: string,
+): MediasoupAnnouncedAddressKind {
   const normalized = stripAddressBrackets(address || "").toLowerCase();
   if (!normalized) return "missing";
   if (isLoopbackHostname(normalized)) return "loopback";
@@ -229,17 +270,6 @@ export const resolvedMediasoupAnnouncedAddressSource = resolvedAnnouncedAddress.
 export const resolvedMediasoupAnnouncedAddressKind = classifyMediasoupAnnouncedAddress(
   resolvedMediasoupAnnouncedAddress,
 );
-export const resolvedMediasoupAnnouncedIp = resolvedMediasoupAnnouncedAddress;
-export const configuredMediaServerUrl = normalizeHttpBaseUrl(env.MEDIA_SERVER_URL);
-export const resolvedMediaServerUrl = normalizeHttpBaseUrl(
-  env.MEDIA_SERVER_URL || env.PUBLIC_BASE_URL,
-);
-export const configuredMediaWsUrl = normalizeWsUrl(
-  env.MEDIA_WS_URL || env.MEDIA_SERVER_URL,
-);
-export const resolvedMediaWsUrl = normalizeWsUrl(
-  env.MEDIA_WS_URL || env.MEDIA_SERVER_URL || env.PUBLIC_BASE_URL,
-);
 
 export type MediasoupNetworkingWarning = {
   code: string;
@@ -253,13 +283,13 @@ export const mediasoupNetworkingWarnings: MediasoupNetworkingWarning[] = (() => 
     warnings.push({
       code: "ANNOUNCED_ADDRESS_UNSET",
       message:
-        "Mediasoup is not advertising a non-loopback address. External voice clients will fail unless PUBLIC_BASE_URL points directly at the reachable node address.",
+        "Mediasoup is not advertising a reachable public hostname or IP. Set MEDIASOUP_ANNOUNCED_ADDRESS or MEDIA_SERVER_URL for EC2 deployments.",
     });
   } else if (resolvedMediasoupAnnouncedAddressKind === "loopback") {
     warnings.push({
       code: "ANNOUNCED_ADDRESS_LOOPBACK",
       message:
-        "Mediasoup is advertising a loopback address. Only same-host clients can reach this voice node.",
+        "Mediasoup is advertising a loopback address. Only same-host clients can reach this media service.",
     });
   } else if (resolvedMediasoupAnnouncedAddressKind === "unspecified") {
     warnings.push({
@@ -271,7 +301,7 @@ export const mediasoupNetworkingWarnings: MediasoupNetworkingWarning[] = (() => 
     warnings.push({
       code: "ANNOUNCED_ADDRESS_PRIVATE",
       message:
-        "Mediasoup is advertising a private address. Internet clients will fail unless they are on the same private network or behind explicit port-forwarding.",
+        "Mediasoup is advertising a private address. Internet clients will fail unless they can reach that private network directly.",
     });
   }
 
@@ -279,7 +309,7 @@ export const mediasoupNetworkingWarnings: MediasoupNetworkingWarning[] = (() => 
     warnings.push({
       code: "UDP_DISABLED",
       message:
-        "UDP is disabled for mediasoup transports. Direct WebRTC connectivity becomes less reliable without TURN when clients are on restrictive networks.",
+        "UDP is disabled for mediasoup transports. WebRTC reliability drops significantly on restrictive networks without TURN.",
     });
   }
 

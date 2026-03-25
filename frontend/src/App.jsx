@@ -134,6 +134,7 @@ import {
   formatMessageTime,
   getContextMenuPoint,
   getCoreGatewayWsCandidates,
+  getDefaultCoreGatewayWsUrl,
   getDesktopBridge,
   getEmoteQuery,
   getInitials,
@@ -657,6 +658,9 @@ export function App() {
   const nodeGatewayWsRef = useRef(null);
   const nodeGatewayHeartbeatRef = useRef(null);
   const nodeGatewayReadyRef = useRef(false);
+  const serverMediaGatewayWsRef = useRef(null);
+  const serverMediaGatewayReadyRef = useRef(false);
+  const serverMediaGatewayHeartbeatRef = useRef(null);
   const voiceGatewayCandidatesRef = useRef([]);
   const voiceSpeakingDetectorRef = useRef({
     audioCtx: null,
@@ -4554,6 +4558,10 @@ export function App() {
           // Everything else stays the same as your existing handler:
           // MESSAGE_* + VOICE_* dispatches, etc.
           if (msg.op === "DISPATCH" && typeof msg.t === "string") {
+            if (handleVoiceGatewayDispatch(msg)) {
+              return;
+            }
+
             if (msg.t === "VOICE_ERROR") {
               const error = msg.d?.error || "VOICE_ERROR";
               const details = msg.d?.details ? ` (${msg.d.details})` : "";
@@ -5304,8 +5312,8 @@ export function App() {
       (currentVoiceUsesPrivateGateway
         ? !!privateCallGatewayReadyRef.current &&
           privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
-        : !!nodeGatewayReadyRef.current &&
-          nodeGatewayWsRef.current?.readyState === WebSocket.OPEN);
+        : !!serverMediaGatewayReadyRef.current &&
+          serverMediaGatewayWsRef.current?.readyState === WebSocket.OPEN);
 
     if (
       !isInVoiceChannel ||
@@ -5411,8 +5419,8 @@ export function App() {
             (currentVoiceUsesPrivateGateway
               ? privateCallGatewayReadyRef.current &&
                 privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
-              : nodeGatewayReadyRef.current &&
-                nodeGatewayWsRef.current?.readyState === WebSocket.OPEN)
+              : serverMediaGatewayReadyRef.current &&
+                serverMediaGatewayWsRef.current?.readyState === WebSocket.OPEN)
           ) {
             void sendNodeVoiceDispatch("VOICE_SPEAKING", {
               guildId: voiceConnectedGuildId,
@@ -9702,6 +9710,261 @@ export function App() {
     setSelectedScreenShareProducerId("");
   }
 
+  function handleVoiceGatewayDispatch(msg) {
+    if (msg?.op !== "DISPATCH" || typeof msg?.t !== "string") return false;
+
+    if (msg.t === "VOICE_ERROR") {
+      const error = msg.d?.error || "VOICE_ERROR";
+      const details = msg.d?.details ? ` (${msg.d.details})` : "";
+      const activeVoiceContext = voiceSfuRef.current?.getContext?.() || {};
+      voiceDebug("VOICE_ERROR received", {
+        error,
+        details: msg.d?.details,
+        code: msg.d?.code,
+        context: activeVoiceContext,
+      });
+      rejectPendingVoiceEventsByScope({
+        guildId: msg.d?.guildId ?? activeVoiceContext.guildId ?? null,
+        channelId: msg.d?.channelId ?? activeVoiceContext.channelId ?? null,
+      });
+      if (voiceSession?.channelId) {
+        cleanupVoiceRtc().catch(() => {});
+        return true;
+      }
+      const message = `Voice connection failed: ${error}${details}`;
+      setStatus(message);
+      window.alert(message);
+      return true;
+    }
+
+    if (msg.t === "VOICE_STATE_UPDATE" && msg.d?.guildId && msg.d?.userId) {
+      const guildId = msg.d.guildId;
+      const userId = msg.d.userId;
+      const channelId = msg.d.channelId || null;
+      setVoiceStatesByGuild((prev) => {
+        const nextGuild = { ...(prev[guildId] || {}) };
+        if (channelId) {
+          nextGuild[userId] = {
+            guildId,
+            channelId,
+            userId,
+            muted: !!msg.d.muted,
+            deafened: !!msg.d.deafened,
+          };
+        } else {
+          delete nextGuild[userId];
+        }
+        return { ...prev, [guildId]: nextGuild };
+      });
+      return true;
+    }
+
+    if (msg.t === "VOICE_STATE_REMOVE" && msg.d?.guildId && msg.d?.userId) {
+      const guildId = msg.d.guildId;
+      const userId = msg.d.userId;
+      setVoiceStatesByGuild((prev) => {
+        if (!prev[guildId]?.[userId]) return prev;
+        const nextGuild = { ...(prev[guildId] || {}) };
+        delete nextGuild[userId];
+        return { ...prev, [guildId]: nextGuild };
+      });
+      return true;
+    }
+
+    if (msg.t === "VOICE_SPEAKING" && msg.d?.guildId && msg.d?.userId) {
+      const guildId = msg.d.guildId;
+      const userId = msg.d.userId;
+      const speaking = !!msg.d.speaking;
+      setVoiceSpeakingByGuild((prev) => ({
+        ...prev,
+        [guildId]: { ...(prev[guildId] || {}), [userId]: speaking },
+      }));
+      return true;
+    }
+
+    return false;
+  }
+
+  function closeDedicatedVoiceGateway(scope = "server") {
+    const wsRef =
+      scope === "private" ? privateCallGatewayWsRef : serverMediaGatewayWsRef;
+    const readyRef =
+      scope === "private"
+        ? privateCallGatewayReadyRef
+        : serverMediaGatewayReadyRef;
+    const heartbeatRef =
+      scope === "private"
+        ? privateCallGatewayHeartbeatRef
+        : serverMediaGatewayHeartbeatRef;
+
+    readyRef.current = false;
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
+    if (wsRef.current) {
+      try {
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      } catch {}
+      wsRef.current = null;
+    }
+  }
+
+  async function connectDedicatedVoiceGateway({
+    scope = "server",
+    wsUrl,
+    mediaToken,
+    guildId,
+    channelId,
+  }) {
+    if (!wsUrl || !mediaToken) {
+      throw new Error("VOICE_MEDIA_SESSION_INCOMPLETE");
+    }
+
+    const wsRef =
+      scope === "private" ? privateCallGatewayWsRef : serverMediaGatewayWsRef;
+    const readyRef =
+      scope === "private"
+        ? privateCallGatewayReadyRef
+        : serverMediaGatewayReadyRef;
+    const heartbeatRef =
+      scope === "private"
+        ? privateCallGatewayHeartbeatRef
+        : serverMediaGatewayHeartbeatRef;
+
+    closeDedicatedVoiceGateway(scope);
+
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      readyRef.current = false;
+      let settled = false;
+
+      const finishResolve = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+
+      const finishReject = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(
+          error instanceof Error
+            ? error
+            : new Error(String(error || "VOICE_GATEWAY_ERROR")),
+        );
+      };
+
+      const timeout = setTimeout(() => {
+        try {
+          ws.close();
+        } catch {}
+        finishReject(new Error("VOICE_GATEWAY_TIMEOUT"));
+      }, 15000);
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ op: "IDENTIFY", d: { mediaToken } }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          resolvePendingVoiceEvent(msg);
+
+          if (msg.op === "HELLO" && msg.d?.heartbeat_interval) {
+            if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+            heartbeatRef.current = setInterval(() => {
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ op: "HEARTBEAT" }));
+              }
+            }, msg.d.heartbeat_interval);
+            return;
+          }
+
+          if (msg.op === "READY") {
+            readyRef.current = true;
+            if (scope === "server") {
+              voiceGatewayCandidatesRef.current = [wsUrl];
+            }
+            if (guildId) {
+              ws.send(
+                JSON.stringify({
+                  op: "DISPATCH",
+                  t: "SUBSCRIBE_GUILD",
+                  d: { guildId },
+                }),
+              );
+            }
+            if (channelId) {
+              ws.send(
+                JSON.stringify({
+                  op: "DISPATCH",
+                  t: "SUBSCRIBE_CHANNEL",
+                  d: { channelId },
+                }),
+              );
+            }
+            finishResolve();
+            return;
+          }
+
+          if (msg.op === "ERROR") {
+            finishReject(new Error(msg.d?.error || "VOICE_GATEWAY_ERROR"));
+            return;
+          }
+
+          handleVoiceGatewayDispatch(msg);
+        } catch {}
+      };
+
+      ws.onerror = () => {};
+      ws.onclose = (event) => {
+        if (wsRef.current === ws) wsRef.current = null;
+        readyRef.current = false;
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current);
+          heartbeatRef.current = null;
+        }
+        if (!settled) {
+          const closeReason = String(event?.reason || "").trim();
+          const closeCode = Number(event?.code || 1000);
+          finishReject(
+            new Error(
+              closeReason
+                ? `VOICE_GATEWAY_CLOSED:${closeReason}`
+                : `VOICE_GATEWAY_CLOSED_${closeCode}`,
+            ),
+          );
+          return;
+        }
+
+        rejectPendingVoiceEvents("VOICE_GATEWAY_CLOSED");
+
+        const scopeIsActive =
+          scope === "private"
+            ? !!activePrivateCallRef.current?.callId
+            : !!voiceConnectedGuildId &&
+              !!voiceConnectedChannelId &&
+              !activePrivateCallRef.current?.callId;
+        if (scopeIsActive) {
+          const closeReason = String(event?.reason || "").trim();
+          setStatus(
+            closeReason
+              ? `Voice gateway disconnected: ${closeReason}`
+              : "Voice gateway disconnected.",
+          );
+        }
+      };
+    });
+  }
+
   async function waitForVoiceGatewayReady(timeoutMs = 15000) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
@@ -9715,6 +9978,14 @@ export function App() {
       )
         return pcWs;
 
+      const mediaWs = serverMediaGatewayWsRef.current;
+      if (
+        mediaWs &&
+        mediaWs.readyState === WebSocket.OPEN &&
+        serverMediaGatewayReadyRef.current
+      )
+        return mediaWs;
+
       const ws = nodeGatewayWsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN && nodeGatewayReadyRef.current)
         return ws;
@@ -9725,6 +9996,8 @@ export function App() {
     // Build a descriptive error so problems are easy to diagnose
     const pcWs = privateCallGatewayWsRef.current;
     const pcState = pcWs?.readyState;
+    const mediaWs = serverMediaGatewayWsRef.current;
+    const mediaState = mediaWs?.readyState;
     const wsState = nodeGatewayWsRef.current?.readyState;
     const stateName = (s) =>
       s === WebSocket.CONNECTING
@@ -9744,6 +10017,7 @@ export function App() {
     throw new Error(
       `VOICE_GATEWAY_UNAVAILABLE:` +
         `pcReady=${privateCallGatewayReadyRef.current ? "1" : "0"},pcWs=${stateName(pcState)},` +
+        `mediaReady=${serverMediaGatewayReadyRef.current ? "1" : "0"},mediaWs=${stateName(mediaState)},` +
         `nodeReady=${nodeGatewayReadyRef.current ? "1" : "0"},nodeWs=${stateName(wsState)},` +
         `candidates=${candidates}`,
     );
@@ -9755,28 +10029,35 @@ export function App() {
   }
 
   function canUseRealtimeVoiceGateway() {
-    const ws = nodeGatewayWsRef.current;
+    const mediaWs = serverMediaGatewayWsRef.current;
+    const nodeWs = nodeGatewayWsRef.current;
     const usable = !!(
-      ws &&
-      ws.readyState === WebSocket.OPEN &&
-      nodeGatewayReadyRef.current
+      (mediaWs &&
+        mediaWs.readyState === WebSocket.OPEN &&
+        serverMediaGatewayReadyRef.current) ||
+      (nodeWs &&
+        nodeWs.readyState === WebSocket.OPEN &&
+        nodeGatewayReadyRef.current)
     );
     if (voiceDebugEnabled) {
-      const wsState = ws?.readyState;
-      const wsStateName =
-        wsState === WebSocket.CONNECTING
+      const mediaState = mediaWs?.readyState;
+      const nodeState = nodeWs?.readyState;
+      const stateName = (state) =>
+        state === WebSocket.CONNECTING
           ? "CONNECTING"
-          : wsState === WebSocket.OPEN
+          : state === WebSocket.OPEN
             ? "OPEN"
-            : wsState === WebSocket.CLOSING
+            : state === WebSocket.CLOSING
               ? "CLOSING"
-              : wsState === WebSocket.CLOSED
+              : state === WebSocket.CLOSED
                 ? "CLOSED"
                 : "MISSING";
       voiceDebug("canUseRealtimeVoiceGateway", {
         usable,
-        readyState: wsStateName,
-        gatewayReady: nodeGatewayReadyRef.current,
+        mediaReadyState: stateName(mediaState),
+        mediaGatewayReady: serverMediaGatewayReadyRef.current,
+        nodeReadyState: stateName(nodeState),
+        nodeGatewayReady: nodeGatewayReadyRef.current,
         activeGuildId,
         activeChannelId,
       });
@@ -9891,9 +10172,31 @@ export function App() {
       !activeServer?.membershipToken
     )
       return;
+    let mediaSessionError = null;
     let sfuError = null;
     try {
       setStatus(`Joining ${channel.name}...`);
+      try {
+        const mediaSession = await nodeApi(
+          activeServer.baseUrl,
+          `/v1/channels/${channel.id}/media-session`,
+          activeServer.membershipToken,
+          { method: "POST" },
+        );
+        if (mediaSession?.mediaWsUrl && mediaSession?.mediaToken) {
+          await connectDedicatedVoiceGateway({
+            scope: "server",
+            wsUrl: mediaSession.mediaWsUrl,
+            mediaToken: mediaSession.mediaToken,
+            guildId: mediaSession.guildId || activeGuildId,
+            channelId: mediaSession.channelId || channel.id,
+          });
+        }
+      } catch (error) {
+        mediaSessionError = error;
+        closeDedicatedVoiceGateway("server");
+      }
+
       await voiceSfuRef.current?.join({
         guildId: activeGuildId,
         channelId: channel.id,
@@ -9910,7 +10213,8 @@ export function App() {
       setStatus(`Joined ${channel.name}.`);
       return;
     } catch (error) {
-      sfuError = error;
+      sfuError = error || mediaSessionError;
+      closeDedicatedVoiceGateway("server");
     }
 
     const allowRestFallback =
@@ -9992,8 +10296,8 @@ export function App() {
 
   /**
    * Connect to the voice channel for an accepted private call.
-   * Opens a dedicated WebSocket to the official node (via core gateway proxy)
-   * so it doesn't interfere with the current server node connection.
+   * Opens a dedicated WebSocket to the media service so it doesn't interfere
+   * with the current server node connection.
    */
   async function joinPrivateVoiceCall(callId) {
     if (!accessToken || !callId) return;
@@ -10002,7 +10306,7 @@ export function App() {
     try {
       setStatus("Joining voice call…");
 
-      // 1. Ask core for a membership token + channel info
+      // 1. Ask core for a media token + room info
       const joinData = await api("/call/join", {
         method: "POST",
         headers: {
@@ -10019,107 +10323,131 @@ export function App() {
         return;
       }
 
-      const { membershipToken, nodeBaseUrl, guildId, channelId } = joinData;
-      if (!membershipToken || !nodeBaseUrl || !guildId || !channelId) {
+      const {
+        mediaToken,
+        mediaWsUrl,
+        membershipToken,
+        nodeBaseUrl,
+        guildId,
+        channelId,
+      } = joinData;
+      if (!guildId || !channelId) {
         setStatus("Voice join failed: incomplete call data from server.");
         return;
       }
 
-      // 2. Open a dedicated gateway WS to the official node.
-      //    The core gateway will proxy voice traffic when given a membershipToken.
-      const coreGatewayWsUrl = (() => {
-        const candidates = getCoreGatewayWsCandidates();
-        return candidates[0] || getDefaultCoreGatewayWsUrl();
-      })();
+      // 2. Open a dedicated gateway WS to the media service when available.
+      //    Older deployments can still fall back to the legacy core proxy path.
+      if (mediaWsUrl && mediaToken) {
+        await connectDedicatedVoiceGateway({
+          scope: "private",
+          wsUrl: mediaWsUrl,
+          mediaToken,
+          guildId,
+          channelId,
+        });
+      } else {
+        if (!membershipToken) {
+          throw new Error("PRIVATE_CALL_GATEWAY_TOKEN_MISSING");
+        }
 
-      await new Promise((resolve, reject) => {
-        const ws = new WebSocket(coreGatewayWsUrl);
-        privateCallGatewayWsRef.current = ws;
-        privateCallGatewayReadyRef.current = false;
-        let settled = false;
+        const coreGatewayWsUrl = (() => {
+          const candidates = getCoreGatewayWsCandidates();
+          return candidates[0] || getDefaultCoreGatewayWsUrl();
+        })();
 
-        const finishResolve = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          resolve();
-        };
+        closeDedicatedVoiceGateway("private");
 
-        const finishReject = (error) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          reject(
-            error instanceof Error
-              ? error
-              : new Error(String(error || "PRIVATE_CALL_GATEWAY_ERROR")),
-          );
-        };
+        await new Promise((resolve, reject) => {
+          const ws = new WebSocket(coreGatewayWsUrl);
+          privateCallGatewayWsRef.current = ws;
+          privateCallGatewayReadyRef.current = false;
+          let settled = false;
 
-        const timeout = setTimeout(() => {
-          try {
-            ws.close();
-          } catch {}
-          finishReject(new Error("PRIVATE_CALL_GATEWAY_TIMEOUT"));
-        }, 15000);
+          const finishResolve = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            resolve();
+          };
 
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ op: "IDENTIFY", d: { membershipToken } }));
-        };
+          const finishReject = (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            reject(
+              error instanceof Error
+                ? error
+                : new Error(String(error || "PRIVATE_CALL_GATEWAY_ERROR")),
+            );
+          };
 
-        ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            resolvePendingVoiceEvent(msg);
+          const timeout = setTimeout(() => {
+            try {
+              ws.close();
+            } catch {}
+            finishReject(new Error("PRIVATE_CALL_GATEWAY_TIMEOUT"));
+          }, 15000);
 
-            if (msg.op === "HELLO" && msg.d?.heartbeat_interval) {
-              if (privateCallGatewayHeartbeatRef.current)
-                clearInterval(privateCallGatewayHeartbeatRef.current);
-              privateCallGatewayHeartbeatRef.current = setInterval(() => {
-                if (
-                  privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
-                )
-                  privateCallGatewayWsRef.current.send(
-                    JSON.stringify({ op: "HEARTBEAT" }),
-                  );
-              }, msg.d.heartbeat_interval);
-              return;
+          ws.onopen = () => {
+            ws.send(JSON.stringify({ op: "IDENTIFY", d: { membershipToken } }));
+          };
+
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data);
+              resolvePendingVoiceEvent(msg);
+
+              if (msg.op === "HELLO" && msg.d?.heartbeat_interval) {
+                if (privateCallGatewayHeartbeatRef.current)
+                  clearInterval(privateCallGatewayHeartbeatRef.current);
+                privateCallGatewayHeartbeatRef.current = setInterval(() => {
+                  if (
+                    privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
+                  )
+                    privateCallGatewayWsRef.current.send(
+                      JSON.stringify({ op: "HEARTBEAT" }),
+                    );
+                }, msg.d.heartbeat_interval);
+                return;
+              }
+
+              if (msg.op === "READY") {
+                privateCallGatewayReadyRef.current = true;
+                finishResolve();
+                return;
+              }
+
+              if (msg.op === "ERROR") {
+                finishReject(
+                  new Error(msg.d?.error || "PRIVATE_CALL_GATEWAY_ERROR"),
+                );
+              }
+            } catch {}
+          };
+
+          ws.onerror = () =>
+            finishReject(new Error("PRIVATE_CALL_GATEWAY_WS_ERROR"));
+          ws.onclose = (event) => {
+            privateCallGatewayReadyRef.current = false;
+            if (privateCallGatewayHeartbeatRef.current) {
+              clearInterval(privateCallGatewayHeartbeatRef.current);
+              privateCallGatewayHeartbeatRef.current = null;
             }
-
-            if (msg.op === "READY") {
-              privateCallGatewayReadyRef.current = true;
-              finishResolve();
-              return;
-            }
-
-            if (msg.op === "ERROR") {
+            if (!settled) {
+              const closeReason = String(event?.reason || "").trim();
+              const closeCode = Number(event?.code || 1000);
               finishReject(
-                new Error(msg.d?.error || "PRIVATE_CALL_GATEWAY_ERROR"),
+                new Error(
+                  closeReason
+                    ? `PRIVATE_CALL_GATEWAY_CLOSED:${closeReason}`
+                    : `PRIVATE_CALL_GATEWAY_CLOSED_${closeCode}`,
+                ),
               );
             }
-          } catch {}
-        };
-
-        ws.onerror = () => finishReject(new Error("PRIVATE_CALL_GATEWAY_WS_ERROR"));
-        ws.onclose = (event) => {
-          privateCallGatewayReadyRef.current = false;
-          if (privateCallGatewayHeartbeatRef.current) {
-            clearInterval(privateCallGatewayHeartbeatRef.current);
-            privateCallGatewayHeartbeatRef.current = null;
-          }
-          if (!settled) {
-            const closeReason = String(event?.reason || "").trim();
-            const closeCode = Number(event?.code || 1000);
-            finishReject(
-              new Error(
-                closeReason
-                  ? `PRIVATE_CALL_GATEWAY_CLOSED:${closeReason}`
-                  : `PRIVATE_CALL_GATEWAY_CLOSED_${closeCode}`,
-              ),
-            );
-          }
-        };
-      });
+          };
+        });
+      }
 
       // 3. Join voice via the SFU (which now routes through privateCallGatewayWsRef)
       await voiceSfuRef.current?.join({
@@ -10150,13 +10478,7 @@ export function App() {
       setCallDuration(0);
       setStatus("Voice call connected.");
     } catch (err) {
-      privateCallGatewayReadyRef.current = false;
-      if (privateCallGatewayWsRef.current) {
-        try {
-          privateCallGatewayWsRef.current.close();
-        } catch {}
-        privateCallGatewayWsRef.current = null;
-      }
+      closeDedicatedVoiceGateway("private");
       setOutgoingCall(null);
       const reason = err.message || "VOICE_JOIN_FAILED";
       setStatus(`Voice call failed: ${reason}`);
@@ -10189,17 +10511,7 @@ export function App() {
     await cleanupVoiceRtc().catch(() => {});
     setVoiceSession({ guildId: "", channelId: "" });
 
-    if (privateCallGatewayWsRef.current) {
-      try {
-        privateCallGatewayWsRef.current.close();
-      } catch {}
-      privateCallGatewayWsRef.current = null;
-    }
-    privateCallGatewayReadyRef.current = false;
-    if (privateCallGatewayHeartbeatRef.current) {
-      clearInterval(privateCallGatewayHeartbeatRef.current);
-      privateCallGatewayHeartbeatRef.current = null;
-    }
+    closeDedicatedVoiceGateway("private");
 
     if (statusMessage) {
       setStatus(statusMessage);
@@ -10499,6 +10811,7 @@ export function App() {
             connectedServer.membershipToken,
             { method: "POST" },
           );
+          closeDedicatedVoiceGateway("server");
         } catch (error) {
           const message = `Disconnected locally. Server voice leave failed: ${error.message || "VOICE_LEAVE_FAILED"}`;
           setStatus(message);
@@ -10513,6 +10826,7 @@ export function App() {
             guildId: targetGuildId,
             channelId: targetChannelId,
           });
+          closeDedicatedVoiceGateway("server");
           return;
         } catch {}
       }
@@ -10528,6 +10842,7 @@ export function App() {
             connectedServer.membershipToken,
             { method: "POST" },
           );
+          closeDedicatedVoiceGateway("server");
           return;
         }
         await nodeApi(
@@ -10536,6 +10851,7 @@ export function App() {
           connectedServer.membershipToken,
           { method: "POST" },
         );
+        closeDedicatedVoiceGateway("server");
       } catch (error) {
         const message = `Disconnected locally. Server voice leave failed: ${error.message || "VOICE_LEAVE_FAILED"}`;
         setStatus(message);

@@ -17,6 +17,7 @@ export type GatewayEnvelope<T = unknown> = {
 // Identify payloads
 export type CoreIdentify = { accessToken: string; deviceId?: string };
 export type NodeIdentify = { membershipToken: string };
+export type MediaIdentify = { mediaToken: string };
 
 // Presence
 export type PresenceStatus = "online" | "idle" | "dnd" | "offline";

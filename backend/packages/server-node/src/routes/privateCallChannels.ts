@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ulidLike } from "@ods/shared/ids.js";
 import { q } from "../db.js";
 import { env } from "../env.js";
+import { syncMediaCloseRoom } from "../mediaSync.js";
 
 /**
  * Internal routes for managing ephemeral voice channels used by private (1:1) calls.
@@ -246,6 +247,7 @@ export async function privateCallChannelRoutes(app: FastifyInstance) {
 
       // Delete the channel (cascades to overwrites, pins, etc. via FK).
       await q(`DELETE FROM channels WHERE id = :channelId`, { channelId });
+      await syncMediaCloseRoom({ guildId, channelId });
 
       app.log.info({ channelId, guildId }, "private-call channel deleted");
 
