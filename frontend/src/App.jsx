@@ -49,6 +49,7 @@ import { ThemeStudioApp } from "./theme/ThemeStudioApp.jsx";
 import { ServerAdminApp } from "./admin/ServerAdminApp.jsx";
 import {
   DOWNLOAD_TARGETS,
+  fetchDownloadTargets,
   getDeviceDownloadContext,
   getMobileDownloadTarget,
   getPreferredDownloadTarget,
@@ -566,6 +567,7 @@ export function App() {
   const [presenceByUserId, setPresenceByUserId] = useState({});
   const [routePath, setRoutePath] = useState(getAppRouteFromLocation);
   const [downloadsMenuOpen, setDownloadsMenuOpen] = useState(false);
+  const [downloadTargets, setDownloadTargets] = useState(DOWNLOAD_TARGETS);
   const [dialogModal, setDialogModal] = useState(null);
   const [gatewayConnected, setGatewayConnected] = useState(false);
   const [nodeGatewayConnected, setNodeGatewayConnected] = useState(false);
@@ -926,12 +928,12 @@ export function App() {
   const memberProfilePopoutRef = useRef(null);
   const downloadMenuRef = useRef(null);
   const preferredDownloadTarget = useMemo(
-    () => getPreferredDownloadTarget(DOWNLOAD_TARGETS),
-    [],
+    () => getPreferredDownloadTarget(downloadTargets),
+    [downloadTargets],
   );
   const mobileDownloadTarget = useMemo(
-    () => getMobileDownloadTarget(DOWNLOAD_TARGETS),
-    [],
+    () => getMobileDownloadTarget(downloadTargets),
+    [downloadTargets],
   );
   const deviceDownloadContext = useMemo(() => getDeviceDownloadContext(), []);
   const isDesktopRuntime = useMemo(() => {
@@ -1243,6 +1245,28 @@ export function App() {
     const onPopState = () => setRoutePath(getAppRouteFromLocation());
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const shouldUseDocumentScroll = routePath === APP_ROUTE_HOME;
+    document.body.classList.toggle("landing-mode", shouldUseDocumentScroll);
+    return () => {
+      document.body.classList.remove("landing-mode");
+    };
+  }, [routePath]);
+
+  useEffect(() => {
+    if (typeof AbortController === "undefined") return undefined;
+    const controller = new AbortController();
+    fetchDownloadTargets(CORE_API, { signal: controller.signal }).then(
+      (targets) => {
+        if (!controller.signal.aborted) {
+          setDownloadTargets(targets);
+        }
+      },
+    );
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -12685,7 +12709,7 @@ export function App() {
   }
 
   function openPreferredDesktopDownload() {
-    const href = preferredDownloadTarget?.href || DOWNLOAD_TARGETS[0]?.href;
+    const href = preferredDownloadTarget?.href || downloadTargets[0]?.href;
     if (!href) return;
     window.open(href, "_blank", "noopener,noreferrer");
   }
@@ -12777,7 +12801,7 @@ export function App() {
         downloadMenuRef={downloadMenuRef}
         downloadsMenuOpen={downloadsMenuOpen}
         setDownloadsMenuOpen={setDownloadsMenuOpen}
-        downloadTargets={DOWNLOAD_TARGETS}
+        downloadTargets={downloadTargets}
         preferredDownloadTarget={preferredDownloadTarget}
         mobileDownloadTarget={mobileDownloadTarget}
         isMobileVisitor={isMobileVisitor}
@@ -15209,7 +15233,7 @@ export function App() {
             isDesktopRuntime={isDesktopRuntime}
             openPreferredDesktopDownload={openPreferredDesktopDownload}
             preferredDownloadTarget={preferredDownloadTarget}
-            downloadTargets={DOWNLOAD_TARGETS}
+            downloadTargets={downloadTargets}
             onOpenProfileStudio={() => {
               setSettingsOpen(false);
               setNavMode("profile");

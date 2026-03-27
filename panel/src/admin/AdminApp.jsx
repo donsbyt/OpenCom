@@ -149,6 +149,12 @@ const STAFF_SCHEDULE_TYPES = [
   { id: "custom", label: "Custom" },
 ];
 
+const CLIENT_RELEASE_CHANNEL_OPTIONS = [
+  { id: "stable", label: "Stable" },
+  { id: "beta", label: "Beta" },
+  { id: "nightly", label: "Nightly" },
+];
+
 function defaultPanelAccountTitle(role = "staff") {
   if (role === "owner") return "Owner";
   if (role === "admin") return "Admin";
@@ -268,6 +274,20 @@ function formatCompactCount(value = 0) {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(Number(value || 0));
+}
+
+function formatFileSize(value = 0) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = numeric;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const precision = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function maskEmail(value = "") {
@@ -390,6 +410,17 @@ export function AdminApp() {
   });
   const [operationsLoading, setOperationsLoading] = useState(false);
   const [operationBusy, setOperationBusy] = useState("");
+  const [clientReleaseChannel, setClientReleaseChannel] = useState("stable");
+  const [clientBuilds, setClientBuilds] = useState([]);
+  const [clientBuildsLoading, setClientBuildsLoading] = useState(false);
+  const [clientUploadBusy, setClientUploadBusy] = useState(false);
+  const [clientUploadInputKey, setClientUploadInputKey] = useState(0);
+  const [clientUploadDraft, setClientUploadDraft] = useState({
+    version: "",
+    channel: "stable",
+    releaseNotes: "",
+    file: null,
+  });
   const [tab, setTab] = useState("overview");
   const [query, setQuery] = useState("");
   const [users, setUsers] = useState([]);
@@ -610,6 +641,7 @@ export function AdminApp() {
     }
     if (tab === "operations" && canManageOperations) {
       loadOperationsState();
+      loadClientBuilds(clientReleaseChannel, { silent: true });
     }
   }, [
     tab,
@@ -626,6 +658,7 @@ export function AdminApp() {
     canSendOfficialMessages,
     canManageBlogs,
     canManageOperations,
+    clientReleaseChannel,
   ]);
 
   useEffect(() => {
@@ -946,6 +979,30 @@ export function AdminApp() {
     }
   }
 
+  async function loadClientBuilds(channel = clientReleaseChannel, { silent = false } = {}) {
+    setClientBuildsLoading(true);
+    try {
+      const activeChannel = String(channel || "stable").trim() || "stable";
+      const data = await api(
+        `/v1/client/builds?channel=${encodeURIComponent(activeChannel)}`,
+        token,
+        panelPassword,
+      );
+      setClientReleaseChannel(activeChannel);
+      setClientBuilds(Array.isArray(data?.builds) ? data.builds : []);
+      if (!silent) {
+        showStatus(`Client builds refreshed for ${activeChannel}.`, "success");
+      }
+    } catch (e) {
+      setClientBuilds([]);
+      if (!silent) {
+        showStatus(e.message || "Failed to load client builds.", "error");
+      }
+    } finally {
+      setClientBuildsLoading(false);
+    }
+  }
+
   async function loadOperationsState({ silent = false } = {}) {
     setOperationsLoading(true);
     try {
@@ -965,6 +1022,59 @@ export function AdminApp() {
     } finally {
       setOperationsLoading(false);
     }
+  }
+
+  async function uploadClientRelease() {
+    if (!clientUploadDraft.version.trim()) {
+      showStatus("Enter a client version before uploading.", "info");
+      return;
+    }
+    if (!clientUploadDraft.file) {
+      showStatus("Choose a client build file to upload.", "info");
+      return;
+    }
+
+    setClientUploadBusy(true);
+    try {
+      const formData = new FormData();
+      formData.set("version", clientUploadDraft.version.trim());
+      formData.set("channel", clientUploadDraft.channel);
+      if (clientUploadDraft.releaseNotes.trim()) {
+        formData.set("releaseNotes", clientUploadDraft.releaseNotes.trim());
+      }
+      formData.set("file", clientUploadDraft.file);
+
+      const data = await api("/v1/admin/client/update", token, panelPassword, {
+        method: "POST",
+        body: formData,
+      });
+
+      const uploadedChannel = clientUploadDraft.channel;
+      setClientUploadDraft({
+        version: "",
+        channel: uploadedChannel,
+        releaseNotes: "",
+        file: null,
+      });
+      setClientUploadInputKey((current) => current + 1);
+      await loadClientBuilds(uploadedChannel, { silent: true });
+      showStatus(
+        `Uploaded ${data?.client?.fileName || "client build"} for ${uploadedChannel}.`,
+        "success",
+      );
+    } catch (e) {
+      showStatus(e.message || "Failed to upload client release.", "error");
+    } finally {
+      setClientUploadBusy(false);
+    }
+  }
+
+  async function refreshOperationsWorkspace() {
+    await Promise.all([
+      loadOperationsState({ silent: true }),
+      loadClientBuilds(clientReleaseChannel, { silent: true }),
+    ]);
+    showStatus("Operations workspace refreshed.", "success");
   }
 
   async function triggerPanelOperation(action) {
@@ -4130,8 +4240,13 @@ export function AdminApp() {
                 </p>
               </div>
               <div className="admin-badge-actions">
-                <button type="button" className="btn-sm" onClick={() => loadOperationsState()} disabled={operationsLoading}>
-                  {operationsLoading ? "Refreshing…" : "Refresh status"}
+                <button
+                  type="button"
+                  className="btn-sm"
+                  onClick={refreshOperationsWorkspace}
+                  disabled={operationsLoading || clientBuildsLoading}
+                >
+                  {operationsLoading || clientBuildsLoading ? "Refreshing…" : "Refresh status"}
                 </button>
               </div>
             </div>
@@ -4191,6 +4306,94 @@ export function AdminApp() {
 
             <div className="admin-operations-grid">
               <div className="admin-card">
+                <div className="admin-card-head">
+                  <div>
+                    <h3>Client releases</h3>
+                    <p>Upload a new desktop or mobile build and make it the active download for its platform and channel.</p>
+                  </div>
+                </div>
+                <div className="admin-client-form">
+                  <label>
+                    Version
+                    <input
+                      type="text"
+                      placeholder="1.0.0"
+                      value={clientUploadDraft.version}
+                      onChange={(event) =>
+                        setClientUploadDraft((current) => ({
+                          ...current,
+                          version: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    Channel
+                    <select
+                      value={clientUploadDraft.channel}
+                      onChange={(event) =>
+                        setClientUploadDraft((current) => ({
+                          ...current,
+                          channel: event.target.value,
+                        }))
+                      }
+                    >
+                      {CLIENT_RELEASE_CHANNEL_OPTIONS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="admin-client-file-field">
+                    Build file
+                    <input
+                      key={clientUploadInputKey}
+                      type="file"
+                      accept=".exe,.apk,.deb,.rpm,.snap,.tar.gz,application/vnd.android.package-archive,application/x-msdownload,application/vnd.debian.binary-package,application/x-debian-package,application/x-rpm,application/x-snap,application/gzip,application/x-gzip"
+                      onChange={(event) =>
+                        setClientUploadDraft((current) => ({
+                          ...current,
+                          file: event.target.files?.[0] || null,
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="admin-client-release-notes">
+                    Release notes
+                    <textarea
+                      rows={5}
+                      placeholder="Optional summary shown to update clients."
+                      value={clientUploadDraft.releaseNotes}
+                      onChange={(event) =>
+                        setClientUploadDraft((current) => ({
+                          ...current,
+                          releaseNotes: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+                <p className="admin-note">
+                  Supported uploads: <code>.exe</code>, <code>.apk</code>, <code>.deb</code>, <code>.rpm</code>, <code>.snap</code>, and <code>.tar.gz</code>.
+                </p>
+                {clientUploadDraft.file ? (
+                  <p className="text-dim">
+                    Ready to upload <strong>{clientUploadDraft.file.name}</strong> ({formatFileSize(clientUploadDraft.file.size)}).
+                  </p>
+                ) : null}
+                <div className="admin-badge-actions admin-operations-actions">
+                  <button
+                    type="button"
+                    onClick={uploadClientRelease}
+                    disabled={clientUploadBusy}
+                  >
+                    {clientUploadBusy ? "Uploading…" : "Upload client build"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="admin-card">
                 <h3>Actions</h3>
                 <p className="text-dim">
                   Use these controls for safe operational flows from the panel.
@@ -4236,6 +4439,78 @@ export function AdminApp() {
                   </>
                 )}
               </div>
+            </div>
+
+            <div className="admin-card">
+              <div className="admin-card-head">
+                <div>
+                  <h3>Active download targets</h3>
+                  <p>These are the builds the site and client download flow will serve for the selected release channel.</p>
+                </div>
+                <label className="admin-client-channel-filter">
+                  <span>Channel</span>
+                  <select
+                    value={clientReleaseChannel}
+                    onChange={(event) => {
+                      const nextChannel = event.target.value;
+                      setClientReleaseChannel(nextChannel);
+                      loadClientBuilds(nextChannel, { silent: true });
+                    }}
+                  >
+                    {CLIENT_RELEASE_CHANNEL_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {clientBuildsLoading ? (
+                <p className="text-dim">Loading client builds…</p>
+              ) : clientBuilds.length === 0 ? (
+                <p className="text-dim">No active client builds found for this channel yet.</p>
+              ) : (
+                <div className="admin-users-table-wrap">
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Platform</th>
+                        <th>Version</th>
+                        <th>File</th>
+                        <th>Size</th>
+                        <th>Published</th>
+                        <th>Download</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {clientBuilds.map((build) => (
+                        <tr key={build.id}>
+                          <td>{build.type}</td>
+                          <td>{build.version || "Unknown"}</td>
+                          <td>{build.fileName || "Unknown"}</td>
+                          <td>{formatFileSize(build.fileSize)}</td>
+                          <td>{formatAdminDateTime(build.publishedAt)}</td>
+                          <td>
+                            {build.downloadUrl ? (
+                              <a
+                                href={build.downloadUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="admin-link-out"
+                              >
+                                Open
+                              </a>
+                            ) : (
+                              <span className="text-dim">Unavailable</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             <div className="admin-card">

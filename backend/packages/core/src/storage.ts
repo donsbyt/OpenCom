@@ -110,3 +110,94 @@ export function deleteProfileImage(storageDir: string, relPath: string) {
     // File doesn't exist or already deleted, that's fine
   }
 }
+// Extend MIME_TO_EXT with client file types
+const CLIENT_MIME_TO_EXT: Record<string, string> = {
+  // Windows
+  "application/x-msdownload": "exe",
+  "application/octet-stream": "bin", // fallback
+  // Android
+  "application/vnd.android.package-archive": "apk",
+  // Linux
+  "application/vnd.debian.binary-package": "deb",
+  "application/x-debian-package": "deb",
+  "application/x-rpm": "rpm",
+  "application/x-snap": "snap",
+  "application/x-tar": "tar",
+  "application/gzip": "tar.gz",
+  "application/x-gzip": "tar.gz",
+};
+ // Infer MIME from filename extension when browser sends application/octet-stream
+const CLIENT_EXT_TO_MIME: Record<string, string> = {
+  ".exe":    "application/x-msdownload",
+  ".apk":    "application/vnd.android.package-archive",
+  ".deb":    "application/x-debian-package",
+  ".rpm":    "application/x-rpm",
+  ".snap":   "application/x-snap",
+  ".tar":    "application/x-tar",
+  ".gz":     "application/gzip",
+};
+ 
+export type ClientPlatform =
+  | "windows"
+  | "linux_deb"
+  | "linux_rpm"
+  | "linux_snap"
+  | "linux_tar"
+  | "android"
+  | "ios"
+  | "macos";
+ 
+const EXT_TO_PLATFORM: Record<string, ClientPlatform> = {
+  ".exe":  "windows",
+  ".apk":  "android",
+  ".deb":  "linux_deb",
+  ".rpm":  "linux_rpm",
+  ".snap": "linux_snap",
+  ".gz":   "linux_tar",
+  ".tar":  "linux_tar",
+};
+ 
+export function resolveClientMime(
+  rawMime: string | undefined,
+  filename: string | undefined,
+): string | null {
+  const mime = String(rawMime || "").trim().toLowerCase();
+  // Trust explicit MIME if we know it
+  if (mime && mime !== "application/octet-stream" && CLIENT_MIME_TO_EXT[mime]) {
+    return mime;
+  }
+  // Fall back to extension
+  const ext = path.extname(filename || "").toLowerCase();
+  return CLIENT_EXT_TO_MIME[ext] ?? null;
+}
+ 
+export function resolveClientPlatform(filename: string): ClientPlatform | null {
+  const ext = path.extname(filename || "").toLowerCase();
+  return EXT_TO_PLATFORM[ext] ?? null;
+}
+ 
+export function sha256Hex(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+ 
+export function saveClientFile(
+  storageDir: string,
+  platform: ClientPlatform,
+  version: string,
+  buffer: Buffer,
+  mimeType: string,
+): string | null {
+  const ext = CLIENT_MIME_TO_EXT[mimeType] ?? "bin";
+  const clientDir = path.join(storageDir, "clients", platform);
+ 
+  try {
+    fs.mkdirSync(clientDir, { recursive: true });
+    const filename = `${platform}_${version}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
+    const filepath = path.join(clientDir, filename);
+    fs.writeFileSync(filepath, buffer, { flag: "w" });
+    return `clients/${platform}/${filename}`;
+  } catch {
+    return null;
+  }
+}
+ 

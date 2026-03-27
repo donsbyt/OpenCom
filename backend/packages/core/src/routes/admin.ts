@@ -1,5 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
+import fs from "node:fs";
+import crypto from "node:crypto";
 import { ulidLike } from "@ods/shared/ids.js";
 import { q } from "../db.js";
 import { hashPassword } from "../crypto.js";
@@ -36,6 +38,89 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
+// ─── Client upload helpers ────────────────────────────────────────────────────
+
+export type ClientPlatform =
+  | "windows"
+  | "linux_deb"
+  | "linux_rpm"
+  | "linux_snap"
+  | "linux_tar"
+  | "android"
+  | "ios"
+  | "macos";
+
+const CLIENT_MIME_TO_EXT: Record<string, string> = {
+  "application/x-msdownload":               "exe",
+  "application/vnd.android.package-archive": "apk",
+  "application/vnd.debian.binary-package":  "deb",
+  "application/x-debian-package":           "deb",
+  "application/x-rpm":                      "rpm",
+  "application/x-snap":                     "snap",
+  "application/x-tar":                      "tar",
+  "application/gzip":                       "tar.gz",
+  "application/x-gzip":                     "tar.gz",
+  "application/octet-stream":               "bin",
+};
+
+const CLIENT_EXT_TO_MIME: Record<string, string> = {
+  ".exe":  "application/x-msdownload",
+  ".apk":  "application/vnd.android.package-archive",
+  ".deb":  "application/x-debian-package",
+  ".rpm":  "application/x-rpm",
+  ".snap": "application/x-snap",
+  ".tar":  "application/x-tar",
+  ".gz":   "application/gzip",
+};
+
+const EXT_TO_PLATFORM: Record<string, ClientPlatform> = {
+  ".exe":  "windows",
+  ".apk":  "android",
+  ".deb":  "linux_deb",
+  ".rpm":  "linux_rpm",
+  ".snap": "linux_snap",
+  ".gz":   "linux_tar",
+  ".tar":  "linux_tar",
+};
+
+function resolveClientMime(rawMime: string | undefined, filename: string | undefined): string | null {
+  const mime = String(rawMime || "").trim().toLowerCase();
+  if (mime && mime !== "application/octet-stream" && CLIENT_MIME_TO_EXT[mime]) return mime;
+  const ext = path.extname(filename || "").toLowerCase();
+  return CLIENT_EXT_TO_MIME[ext] ?? null;
+}
+
+function resolveClientPlatform(filename: string): ClientPlatform | null {
+  const ext = path.extname(filename || "").toLowerCase();
+  return EXT_TO_PLATFORM[ext] ?? null;
+}
+
+function sha256Hex(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function saveClientFile(
+  storageDir: string,
+  platform: ClientPlatform,
+  version: string,
+  buffer: Buffer,
+  mimeType: string,
+): string | null {
+  const ext = CLIENT_MIME_TO_EXT[mimeType] ?? "bin";
+  const clientDir = path.join(storageDir, "clients", platform);
+  try {
+    fs.mkdirSync(clientDir, { recursive: true });
+    const filename = `${platform}_${version}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
+    const filepath = path.join(clientDir, filename);
+    fs.writeFileSync(filepath, buffer, { flag: "w" });
+    return `clients/${platform}/${filename}`;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 const PLATFORM_ADMIN_BADGE = "PLATFORM_ADMIN";
 const PLATFORM_FOUNDER_BADGE = "PLATFORM_FOUNDER";
 const RESERVED_BADGE_IDS = new Set([
@@ -57,6 +142,9 @@ const OFFICIAL_WELCOME_MESSAGE_BODY = z.object({
   enabled: z.boolean(),
   content: z.string().max(OFFICIAL_MESSAGE_MAX_LENGTH),
 });
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 type BroadcastToUser = (targetUserId: string, t: string, d: any) => Promise<void>;
 
 type BadgeDefinitionRow = {
@@ -111,6 +199,8 @@ type PanelStaffScheduleRow = {
   created_at: string;
   updated_at: string;
 };
+
+// ─── Badge helpers ────────────────────────────────────────────────────────────
 
 const BADGE_IMAGE_MIME_ALIASES: Record<string, string> = {
   "image/jpg": "image/jpeg",
@@ -332,6 +422,8 @@ function normalizePanelAccountPermissions(
   return normalized.length ? normalized : ["manage_support"];
 }
 
+// ─── Zod schemas ──────────────────────────────────────────────────────────────
+
 const PANEL_PERMISSION_ENUM = z.enum(PLATFORM_PANEL_PERMISSIONS);
 
 const staffAssignmentBodySchema = z.object({
@@ -415,6 +507,19 @@ const badgeDefinitionBodySchema = z.object({
   bgColor: nullableTrimmedString(40).optional(),
   fgColor: nullableTrimmedString(40).optional(),
 });
+
+const CLIENT_UPLOAD_FIELDS = z.object({
+  version: z
+    .string()
+    .trim()
+    .min(1)
+    .max(32)
+    .regex(/^\d+\.\d+\.\d+/, "Version must start with semver e.g. 1.0.0"),
+  channel: z.enum(["stable", "beta", "nightly"]).default("stable"),
+  releaseNotes: z.string().trim().max(2000).optional(),
+});
+
+// ─── Panel operations ─────────────────────────────────────────────────────────
 
 type PanelOperationAction = "restart" | "update";
 type PanelOperationStatus = "success" | "failed";
@@ -506,31 +611,18 @@ async function runCommandCapture(command: string, args: string[]) {
 
       let stdout = "";
       let stderr = "";
-      child.stdout?.on("data", (chunk) => {
-        stdout += String(chunk || "");
-      });
-      child.stderr?.on("data", (chunk) => {
-        stderr += String(chunk || "");
-      });
-      child.on("error", (error) => {
-        stderr += error.message;
-      });
+      child.stdout?.on("data", (chunk) => { stdout += String(chunk || ""); });
+      child.stderr?.on("data", (chunk) => { stderr += String(chunk || ""); });
+      child.on("error", (error) => { stderr += error.message; });
       child.on("close", (code) => {
-        resolve({
-          exitCode: typeof code === "number" ? code : -1,
-          stdout,
-          stderr,
-        });
+        resolve({ exitCode: typeof code === "number" ? code : -1, stdout, stderr });
       });
     },
   );
 }
 
 async function getPanelRuntimeStatus() {
-  const result = await runCommandCapture("bash", [
-    PANEL_RUNTIME_CONTROL_SCRIPT,
-    "status",
-  ]);
+  const result = await runCommandCapture("bash", [PANEL_RUNTIME_CONTROL_SCRIPT, "status"]);
 
   const fallback = {
     tmuxInstalled: false,
@@ -540,24 +632,16 @@ async function getPanelRuntimeStatus() {
     windowExists: false,
     paneTarget: PANEL_TMUX_SESSION,
     startCommand: PANEL_START_COMMAND,
-    statusError:
-      result.exitCode === 0 ? null : `STATUS_EXIT_${result.exitCode}`,
+    statusError: result.exitCode === 0 ? null : `STATUS_EXIT_${result.exitCode}`,
   };
 
   if (result.exitCode !== 0) return fallback;
 
   try {
     const parsed = JSON.parse(result.stdout);
-    return {
-      ...fallback,
-      ...parsed,
-      statusError: null,
-    };
+    return { ...fallback, ...parsed, statusError: null };
   } catch {
-    return {
-      ...fallback,
-      statusError: "STATUS_PARSE_FAILED",
-    };
+    return { ...fallback, statusError: "STATUS_PARSE_FAILED" };
   }
 }
 
@@ -567,10 +651,7 @@ async function runPanelOperation(action: PanelOperationAction) {
 
   const start = Date.now();
   const startedAt = new Date(start).toISOString();
-  pushPanelOperationLog(
-    logLines,
-    `[info] Starting ${action === "update" ? "update + restart" : "restart"} flow`,
-  );
+  pushPanelOperationLog(logLines, `[info] Starting ${action === "update" ? "update + restart" : "restart"} flow`);
 
   const exitCode = await new Promise<number>((resolve) => {
     const child = spawn("bash", [PANEL_RUNTIME_CONTROL_SCRIPT, scriptAction], {
@@ -583,46 +664,29 @@ async function runPanelOperation(action: PanelOperationAction) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const attachReader = (
-      stream: NodeJS.ReadableStream | null,
-      prefix: string,
-    ) => {
+    const attachReader = (stream: NodeJS.ReadableStream | null, prefix: string) => {
       if (!stream) return;
       const reader = createInterface({ input: stream });
-      reader.on("line", (line) => {
-        pushPanelOperationLog(logLines, `${prefix} ${line}`);
-      });
+      reader.on("line", (line) => { pushPanelOperationLog(logLines, `${prefix} ${line}`); });
     };
 
     attachReader(child.stdout, "[out]");
     attachReader(child.stderr, "[err]");
-
-    child.on("error", (error) => {
-      pushPanelOperationLog(logLines, `[err] ${error.message}`);
-      resolve(-1);
-    });
-    child.on("close", (code) => {
-      resolve(typeof code === "number" ? code : -1);
-    });
+    child.on("error", (error) => { pushPanelOperationLog(logLines, `[err] ${error.message}`); resolve(-1); });
+    child.on("close", (code) => { resolve(typeof code === "number" ? code : -1); });
   });
 
   const finishedAt = new Date().toISOString();
   const durationMs = Math.max(0, Date.now() - start);
   pushPanelOperationLog(
     logLines,
-    exitCode === 0
-      ? "[info] Operation completed successfully."
-      : `[err] Operation failed with exit code ${exitCode}.`,
+    exitCode === 0 ? "[info] Operation completed successfully." : `[err] Operation failed with exit code ${exitCode}.`,
   );
 
-  return {
-    startedAt,
-    finishedAt,
-    durationMs,
-    exitCode,
-    output: logLines,
-  };
+  return { startedAt, finishedAt, durationMs, exitCode, output: logLines };
 }
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 export async function adminRoutes(app: FastifyInstance, broadcastToUser?: BroadcastToUser) {
   app.get("/v1/admin/overview", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -664,64 +728,24 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       supportTicketsTotal,
       supportTicketsOpen,
     ] = await Promise.all([
-      countRowsSafe(
-        `SELECT COUNT(*) AS count
-         FROM admin_boost_grants
-         WHERE revoked_at IS NULL
-           AND (expires_at IS NULL OR expires_at > NOW())`,
-        {},
-        { fallbackOnMissingTable: true },
-      ),
-      countRowsSafe(
-        `SELECT COUNT(*) AS count
-         FROM panel_admin_users
-         WHERE role='staff'
-           AND disabled_at IS NULL`,
-      ),
-      countRowsSafe(
-        `SELECT COUNT(*) AS count
-         FROM blog_posts
-         WHERE status='published'
-           AND published_at IS NOT NULL`,
-        {},
-        { fallbackOnMissingTable: true },
-      ),
-      countRowsSafe(
-        `SELECT COUNT(*) AS count
-         FROM user_badges
-         WHERE badge='boost'`,
-        {},
-        { fallbackOnMissingTable: true },
-      ),
-      countRowsSafe(
-        `SELECT COUNT(DISTINCT user_id) AS count
-         FROM user_subscriptions
-         WHERE status IN ('active','trialing','past_due')`,
-        {},
-        { fallbackOnMissingTable: true },
-      ),
-      countRowsSafe(`SELECT COUNT(*) AS count FROM badge_definitions`, {}, {
-        fallbackOnMissingTable: true,
-      }),
-      countRowsSafe(`SELECT COUNT(*) AS count FROM support_tickets`, {}, {
-        fallbackOnMissingTable: true,
-      }),
-      countRowsSafe(
-        `SELECT COUNT(*) AS count
-         FROM support_tickets
-         WHERE status IN ('open','waiting_on_staff','waiting_on_user')`,
-        {},
-        { fallbackOnMissingTable: true },
-      ),
+      countRowsSafe(`SELECT COUNT(*) AS count FROM admin_boost_grants WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`, {}, { fallbackOnMissingTable: true }),
+      countRowsSafe(`SELECT COUNT(*) AS count FROM panel_admin_users WHERE role='staff' AND disabled_at IS NULL`),
+      countRowsSafe(`SELECT COUNT(*) AS count FROM blog_posts WHERE status='published' AND published_at IS NOT NULL`, {}, { fallbackOnMissingTable: true }),
+      countRowsSafe(`SELECT COUNT(*) AS count FROM user_badges WHERE badge='boost'`, {}, { fallbackOnMissingTable: true }),
+      countRowsSafe(`SELECT COUNT(DISTINCT user_id) AS count FROM user_subscriptions WHERE status IN ('active','trialing','past_due')`, {}, { fallbackOnMissingTable: true }),
+      countRowsSafe(`SELECT COUNT(*) AS count FROM badge_definitions`, {}, { fallbackOnMissingTable: true }),
+      countRowsSafe(`SELECT COUNT(*) AS count FROM support_tickets`, {}, { fallbackOnMissingTable: true }),
+      countRowsSafe(`SELECT COUNT(*) AS count FROM support_tickets WHERE status IN ('open','waiting_on_staff','waiting_on_user')`, {}, { fallbackOnMissingTable: true }),
     ]);
 
+    const boost_real = boostStripeMembers;
     return {
       founder: founder[0]?.id ? founder[0] : null,
       admins,
       activeBoostGrants,
       staffAssignmentsCount: staffAssignments,
       publishedBlogsCount: publishedBlogs,
-      boostBadgeMembers,
+      boost_real,
       boostStripeMembers,
       badgeDefinitionsCount: badgeDefinitions,
       supportTicketsTotal,
@@ -735,7 +759,6 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     } catch {
       return rep.code(403).send({ error: "FORBIDDEN" });
     }
-
     return getAdminStatsSnapshot();
   });
 
@@ -745,13 +768,8 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     } catch {
       return rep.code(403).send({ error: "FORBIDDEN" });
     }
-
     const runtime = await getPanelRuntimeStatus();
-    return {
-      runtime,
-      activeOperation: activePanelOperation,
-      history: panelOperationHistory,
-    };
+    return { runtime, activeOperation: activePanelOperation, history: panelOperationHistory };
   });
 
   app.post("/v1/admin/operations/restart", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -762,44 +780,27 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     if (activePanelOperation) {
-      return rep.code(409).send({
-        error: "OPERATION_IN_PROGRESS",
-        activeOperation: activePanelOperation,
-      });
+      return rep.code(409).send({ error: "OPERATION_IN_PROGRESS", activeOperation: activePanelOperation });
     }
 
     const actorId = getActorAdminId(req);
     const actorUsername = String(req.panelAdmin?.username || "unknown");
     const operationId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    activePanelOperation = {
-      id: operationId,
-      action: "restart",
-      startedAt: new Date().toISOString(),
-      actorId,
-      actorUsername,
-    };
+    activePanelOperation = { id: operationId, action: "restart", startedAt: new Date().toISOString(), actorId, actorUsername };
 
     try {
       const result = await runPanelOperation("restart");
       const record: PanelOperationRecord = {
-        id: operationId,
-        action: "restart",
+        id: operationId, action: "restart",
         status: result.exitCode === 0 ? "success" : "failed",
-        startedAt: result.startedAt,
-        finishedAt: result.finishedAt,
-        durationMs: result.durationMs,
-        actorId,
-        actorUsername,
-        exitCode: result.exitCode,
-        output: result.output,
+        startedAt: result.startedAt, finishedAt: result.finishedAt,
+        durationMs: result.durationMs, actorId, actorUsername,
+        exitCode: result.exitCode, output: result.output,
       };
       addPanelOperationHistory(record);
       const runtime = await getPanelRuntimeStatus();
-      return rep.code(result.exitCode === 0 ? 200 : 500).send({
-        operation: record,
-        runtime,
-      });
+      return rep.code(result.exitCode === 0 ? 200 : 500).send({ operation: record, runtime });
     } finally {
       activePanelOperation = null;
     }
@@ -813,44 +814,27 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     if (activePanelOperation) {
-      return rep.code(409).send({
-        error: "OPERATION_IN_PROGRESS",
-        activeOperation: activePanelOperation,
-      });
+      return rep.code(409).send({ error: "OPERATION_IN_PROGRESS", activeOperation: activePanelOperation });
     }
 
     const actorId = getActorAdminId(req);
     const actorUsername = String(req.panelAdmin?.username || "unknown");
     const operationId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    activePanelOperation = {
-      id: operationId,
-      action: "update",
-      startedAt: new Date().toISOString(),
-      actorId,
-      actorUsername,
-    };
+    activePanelOperation = { id: operationId, action: "update", startedAt: new Date().toISOString(), actorId, actorUsername };
 
     try {
       const result = await runPanelOperation("update");
       const record: PanelOperationRecord = {
-        id: operationId,
-        action: "update",
+        id: operationId, action: "update",
         status: result.exitCode === 0 ? "success" : "failed",
-        startedAt: result.startedAt,
-        finishedAt: result.finishedAt,
-        durationMs: result.durationMs,
-        actorId,
-        actorUsername,
-        exitCode: result.exitCode,
-        output: result.output,
+        startedAt: result.startedAt, finishedAt: result.finishedAt,
+        durationMs: result.durationMs, actorId, actorUsername,
+        exitCode: result.exitCode, output: result.output,
       };
       addPanelOperationHistory(record);
       const runtime = await getPanelRuntimeStatus();
-      return rep.code(result.exitCode === 0 ? 200 : 500).send({
-        operation: record,
-        runtime,
-      });
+      return rep.code(result.exitCode === 0 ? 200 : 500).send({ operation: record, runtime });
     } finally {
       activePanelOperation = null;
     }
@@ -864,7 +848,6 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     const { query } = z.object({ query: z.string().min(1).max(64) }).parse(req.query);
-
     const users = await q<any>(
       `SELECT u.id,u.username,u.email,IF(ab.user_id IS NULL, 0, 1) AS isBanned
        FROM users u
@@ -874,7 +857,6 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
        LIMIT 20`,
       { likeQ: `%${query}%` }
     );
-
     return { users };
   });
 
@@ -891,10 +873,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
        FROM badge_definitions
        ORDER BY updated_at DESC, badge_id ASC`
     );
-
-    return {
-      definitions: definitions.map(serializeBadgeDefinition),
-    };
+    return { definitions: definitions.map(serializeBadgeDefinition) };
   });
 
   app.post("/v1/admin/badge-definitions/upload", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -916,23 +895,113 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const buffer = await data.toBuffer();
     const saved = saveProfileImageFromBuffer(env.PROFILE_IMAGE_STORAGE_DIR, actorId, "asset", buffer, mime);
     if (!saved) return rep.code(500).send({ error: "SAVE_FAILED" });
+
     if (isS3StorageEnabled()) {
       try {
-        await uploadFileToObjectStorage(
-          "profiles",
-          saved,
-          path.join(env.PROFILE_IMAGE_STORAGE_DIR, saved),
-          mime,
-        );
+        await uploadFileToObjectStorage("profiles", saved, path.join(env.PROFILE_IMAGE_STORAGE_DIR, saved), mime);
       } catch {
         deleteProfileImage(env.PROFILE_IMAGE_STORAGE_DIR, saved);
         return rep.code(500).send({ error: "SAVE_FAILED" });
       }
     }
 
-    return {
-      imageUrl: `${env.PROFILE_IMAGE_BASE_URL}/${saved}`,
-    };
+    return { imageUrl: `${env.PROFILE_IMAGE_BASE_URL}/${saved}` };
+  });
+
+  app.post("/v1/admin/client/update", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
+    try {
+      await requirePanelOperationsAccess(req)
+    } catch {
+      return rep.code(403).send({ error: "FORBIDDEN" });
+    }
+
+    const actorId = getActorAdminId(req);
+
+    const data = await req.file({ limits: { fileSize: 500 * 1024 * 1024 } });
+    if (!data) return rep.code(400).send({ error: "MISSING_FILE" });
+
+    const fieldsParsed = CLIENT_UPLOAD_FIELDS.safeParse(data.fields ?? {});
+    if (!fieldsParsed.success) {
+      return rep.code(400).send({ error: "INVALID_FIELDS", details: fieldsParsed.error.flatten().fieldErrors });
+    }
+    const { version, channel, releaseNotes } = fieldsParsed.data;
+
+    const mime = resolveClientMime(data.mimetype, data.filename);
+    if (!mime) {
+      return rep.code(400).send({ error: "UNSUPPORTED_FILE_TYPE", hint: "Supported: .exe .apk .deb .rpm .snap .tar.gz" });
+    }
+
+    const platform = resolveClientPlatform(data.filename ?? "");
+    if (!platform) {
+      return rep.code(400).send({ error: "UNRECOGNISED_PLATFORM", hint: "Cannot determine target platform from file extension." });
+    }
+
+    const buffer = await data.toBuffer();
+    if (!buffer.length) return rep.code(400).send({ error: "EMPTY_FILE" });
+
+    const checksum = sha256Hex(buffer);
+    const fileSize = buffer.length;
+    const originalFilename = data.filename ?? `${platform}_${version}`;
+
+    const saved = saveClientFile(env.PROFILE_IMAGE_STORAGE_DIR, platform, version, buffer, mime);
+    if (!saved) return rep.code(500).send({ error: "SAVE_FAILED" });
+
+    if (isS3StorageEnabled()) {
+      try {
+        await uploadFileToObjectStorage("clients", saved, path.join(env.PROFILE_IMAGE_STORAGE_DIR, saved), mime);
+      } catch {
+        deleteProfileImage(env.PROFILE_IMAGE_STORAGE_DIR, saved);
+        return rep.code(500).send({ error: "OBJECT_STORAGE_FAILED" });
+      }
+    }
+
+    await q(
+      `UPDATE client SET is_active = FALSE WHERE type = :platform AND channel = :channel AND is_active = TRUE`,
+      { platform, channel },
+    );
+
+    const clientId = ulidLike();
+    await q(
+      `INSERT INTO client (
+         id, type, version, channel,
+         file_path, file_name, mime_type, file_size,
+         checksum_sha256, is_active, release_notes, uploaded_by
+       ) VALUES (
+         :id, :type, :version, :channel,
+         :filePath, :fileName, :mimeType, :fileSize,
+         :checksum, TRUE, :releaseNotes, :uploadedBy
+       )`,
+      {
+        id: clientId,
+        type: platform,
+        version,
+        channel,
+        filePath: saved,
+        fileName: originalFilename,
+        mimeType: mime,
+        fileSize,
+        checksum,
+        releaseNotes: releaseNotes ?? null,
+        uploadedBy: actorId || null,
+      },
+    );
+
+    return rep.code(201).send({
+      ok: true,
+      client: {
+        id: clientId,
+        type: platform,
+        version,
+        channel,
+        filePath: saved,
+        fileName: originalFilename,
+        mimeType: mime,
+        fileSize,
+        checksum,
+        downloadUrl: `${env.PROFILE_IMAGE_BASE_URL}/${saved}`,
+        releaseNotes: releaseNotes ?? null,
+      },
+    });
   });
 
   app.put("/v1/admin/badge-definitions/:badgeId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -988,10 +1057,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
        LIMIT 1`,
       { badgeId }
     );
-
-    return {
-      definition: rows[0] ? serializeBadgeDefinition(rows[0]) : null,
-    };
+    return { definition: rows[0] ? serializeBadgeDefinition(rows[0]) : null };
   });
 
   app.delete("/v1/admin/badge-definitions/:badgeId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1060,10 +1126,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       });
     }
 
-    return {
-      user: userRows[0],
-      badges: derivedBadges
-    };
+    return { user: userRows[0], badges: derivedBadges };
   });
 
   app.post("/v1/admin/users/:userId/platform-admin", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1084,9 +1147,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     if (enabled) {
       await q(
-        `INSERT INTO platform_admins (user_id,added_by)
-         VALUES (:userId,:actorId)
-         ON DUPLICATE KEY UPDATE user_id=user_id`,
+        `INSERT INTO platform_admins (user_id,added_by) VALUES (:userId,:actorId) ON DUPLICATE KEY UPDATE user_id=user_id`,
         { userId, actorId: userId }
       );
       await setBadge(userId, PLATFORM_ADMIN_BADGE, true);
@@ -1106,7 +1167,6 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     const { userId } = parseBody(z.object({ userId: z.string().min(3) }), req.body);
-
     const target = await q<{ id: string; email: string; username: string }>(
       `SELECT id,email,username FROM users WHERE id=:userId`,
       { userId }
@@ -1116,9 +1176,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const prev = await q<{ founder_user_id: string | null }>(`SELECT founder_user_id FROM platform_config WHERE id=1`);
 
     await q(
-      `INSERT INTO platform_config (id, founder_user_id)
-       VALUES (1,:userId)
-       ON DUPLICATE KEY UPDATE founder_user_id=VALUES(founder_user_id)`,
+      `INSERT INTO platform_config (id, founder_user_id) VALUES (1,:userId) ON DUPLICATE KEY UPDATE founder_user_id=VALUES(founder_user_id)`,
       { userId }
     );
 
@@ -1128,11 +1186,8 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     await setBadge(userId, PLATFORM_FOUNDER_BADGE, true);
     await setBadge(userId, PLATFORM_ADMIN_BADGE, true);
-
     await q(
-      `INSERT INTO platform_admins (user_id,added_by)
-       VALUES (:userId,:actorId)
-       ON DUPLICATE KEY UPDATE user_id=user_id`,
+      `INSERT INTO platform_admins (user_id,added_by) VALUES (:userId,:actorId) ON DUPLICATE KEY UPDATE user_id=user_id`,
       { userId, actorId: userId }
     );
 
@@ -1146,7 +1201,6 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       return rep.code(403).send({ error: "FORBIDDEN" });
     }
 
-    const actorId = getActorAdminId(req);
     const { userId } = z.object({ userId: z.string().min(3) }).parse(req.params);
     const body = parseBody(z.object({ badge: z.string().min(2).max(64), enabled: z.boolean() }), req.body);
 
@@ -1171,12 +1225,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     const { userId } = z.object({ userId: z.string().min(3) }).parse(req.params);
-    const body = parseBody(
-      z.object({
-        reason: z.string().trim().max(240).optional()
-      }),
-      req.body
-    );
+    const body = parseBody(z.object({ reason: z.string().trim().max(240).optional() }), req.body);
 
     const target = await q<{ id: string; email: string; username: string }>(
       `SELECT id,email,username FROM users WHERE id=:userId`,
@@ -1192,32 +1241,23 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     await q(
       `INSERT INTO account_bans (user_id,banned_by,reason)
        VALUES (:userId,:actorId,:reason)
-       ON DUPLICATE KEY UPDATE
-         banned_by=VALUES(banned_by),
-         reason=VALUES(reason),
-         created_at=NOW()`,
+       ON DUPLICATE KEY UPDATE banned_by=VALUES(banned_by), reason=VALUES(reason), created_at=NOW()`,
       { userId, actorId, reason: body.reason || null }
     );
     await q(
-      `UPDATE refresh_tokens
-       SET revoked_at=NOW()
-       WHERE user_id=:userId AND revoked_at IS NULL`,
+      `UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=:userId AND revoked_at IS NULL`,
       { userId }
     );
 
     let emailDelivery = { state: "skipped", error: null as string | null };
     try {
-      await sendAccountBanEmail(target[0].email, {
-        username: target[0].username,
-        reason: body.reason || null,
-      });
+      await sendAccountBanEmail(target[0].email, { username: target[0].username, reason: body.reason || null });
       emailDelivery = { state: "sent", error: null };
     } catch (error) {
       const mapped = mapMailError(error);
-      emailDelivery =
-        mapped === "SMTP_NOT_CONFIGURED"
-          ? { state: "unavailable", error: mapped }
-          : { state: "failed", error: mapped };
+      emailDelivery = mapped === "SMTP_NOT_CONFIGURED"
+        ? { state: "unavailable", error: mapped }
+        : { state: "failed", error: mapped };
     }
 
     return { ok: true, userId, banned: true, emailDelivery };
@@ -1243,7 +1283,6 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     const { userId } = z.object({ userId: z.string().min(3) }).parse(req.params);
-
     const target = await q<{ id: string }>(`SELECT id FROM users WHERE id=:userId`, { userId });
     if (!target.length) return rep.code(404).send({ error: "USER_NOT_FOUND" });
 
@@ -1333,10 +1372,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     await q(`INSERT INTO platform_config (id, founder_user_id) VALUES (1, NULL) ON DUPLICATE KEY UPDATE id=id`);
     await q(
-      `UPDATE platform_config
-       SET boost_trial_starts_at=:startsAt,
-           boost_trial_ends_at=:endsAt
-       WHERE id=1`,
+      `UPDATE platform_config SET boost_trial_starts_at=:startsAt, boost_trial_ends_at=:endsAt WHERE id=1`,
       {
         startsAt: startsAtDate ? toMySqlDateTime(startsAtDate) : null,
         endsAt: endsAtDate ? toMySqlDateTime(endsAtDate) : null
@@ -1379,11 +1415,8 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     await q(
-      `UPDATE admin_boost_grants
-       SET revoked_at=NOW(), revoked_by=:actorId
-       WHERE user_id=:userId
-         AND revoked_at IS NULL
-         AND (expires_at IS NULL OR expires_at > NOW())`,
+      `UPDATE admin_boost_grants SET revoked_at=NOW(), revoked_by=:actorId
+       WHERE user_id=:userId AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`,
       { userId, actorId }
     );
 
@@ -1394,24 +1427,11 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     await q(
       `INSERT INTO admin_boost_grants (user_id,granted_by,grant_type,reason,expires_at)
        VALUES (:userId,:actorId,:grantType,:reason,:expiresAt)`,
-      {
-        userId,
-        actorId,
-        grantType: body.grantType,
-        reason: body.reason || null,
-        expiresAt
-      }
+      { userId, actorId, grantType: body.grantType, reason: body.reason || null, expiresAt }
     );
 
     const entitlement = await reconcileBoostBadge(userId);
-    return {
-      ok: true,
-      userId,
-      grantType: body.grantType,
-      expiresAt,
-      boostActive: entitlement.active,
-      boostSource: entitlement.source
-    };
+    return { ok: true, userId, grantType: body.grantType, expiresAt, boostActive: entitlement.active, boostSource: entitlement.source };
   });
 
   app.post("/v1/admin/users/:userId/boost/revoke", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1424,19 +1444,12 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     const { userId } = z.object({ userId: z.string().min(3) }).parse(req.params);
     await q(
-      `UPDATE admin_boost_grants
-       SET revoked_at=NOW(), revoked_by=:actorId
-       WHERE user_id=:userId
-         AND revoked_at IS NULL
-         AND (expires_at IS NULL OR expires_at > NOW())`,
+      `UPDATE admin_boost_grants SET revoked_at=NOW(), revoked_by=:actorId
+       WHERE user_id=:userId AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`,
       { userId, actorId }
     );
     const entitlement = await reconcileBoostBadge(userId);
-    return {
-      ok: true,
-      boostActive: entitlement.active,
-      boostSource: entitlement.source
-    };
+    return { ok: true, boostActive: entitlement.active, boostSource: entitlement.source };
   });
 
   app.get("/v1/admin/official-messages/status", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1449,11 +1462,8 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const officialAccount = await getOfficialAccount();
     const newUserWelcomeMessage = await getNewUserOfficialMessageConfig();
     const totalReachableRows = await q<{ count: number }>(
-      `SELECT COUNT(*) AS count
-       FROM users u
-       LEFT JOIN account_bans ab ON ab.user_id=u.id
-       WHERE ab.user_id IS NULL
-         AND LOWER(u.username)<>LOWER(:username)`,
+      `SELECT COUNT(*) AS count FROM users u LEFT JOIN account_bans ab ON ab.user_id=u.id
+       WHERE ab.user_id IS NULL AND LOWER(u.username)<>LOWER(:username)`,
       { username: "opencom" }
     );
 
@@ -1473,10 +1483,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       newUserWelcomeMessage: {
         enabled: newUserWelcomeMessage.enabled,
         content: newUserWelcomeMessage.content,
-        active:
-          newUserWelcomeMessage.enabled &&
-          !!newUserWelcomeMessage.content.trim() &&
-          !!officialAccount,
+        active: newUserWelcomeMessage.enabled && !!newUserWelcomeMessage.content.trim() && !!officialAccount,
       },
     };
   });
@@ -1493,15 +1500,8 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       return rep.code(400).send({ error: "WELCOME_MESSAGE_REQUIRED" });
     }
 
-    const saved = await saveNewUserOfficialMessageConfig({
-      enabled: body.enabled,
-      content: body.content,
-    });
-
-    return {
-      ok: true,
-      newUserWelcomeMessage: saved,
-    };
+    const saved = await saveNewUserOfficialMessageConfig({ enabled: body.enabled, content: body.content });
+    return { ok: true, newUserWelcomeMessage: saved };
   });
 
   app.post("/v1/admin/official-messages/send", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1530,10 +1530,8 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     if (body.recipientMode === "all") {
       recipients = await q<{ id: string; username: string; display_name: string | null; pfp_url: string | null }>(
         `SELECT u.id,u.username,u.display_name,u.pfp_url
-         FROM users u
-         LEFT JOIN account_bans ab ON ab.user_id=u.id
-         WHERE ab.user_id IS NULL
-           AND u.id<>:senderId
+         FROM users u LEFT JOIN account_bans ab ON ab.user_id=u.id
+         WHERE ab.user_id IS NULL AND u.id<>:senderId
          ORDER BY u.created_at DESC`,
         { senderId: officialAccount.id }
       );
@@ -1541,20 +1539,12 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       const requestedIds = uniqueTrimmedStrings(body.userIds).filter((userId) => userId !== officialAccount.id);
       if (!requestedIds.length) return rep.code(400).send({ error: "RECIPIENTS_REQUIRED" });
       const params: Record<string, string> = { senderId: officialAccount.id };
-      const inList = requestedIds
-        .map((userId, index) => {
-          params[`u${index}`] = userId;
-          return `:u${index}`;
-        })
-        .join(",");
+      const inList = requestedIds.map((userId, index) => { params[`u${index}`] = userId; return `:u${index}`; }).join(",");
 
       recipients = await q<{ id: string; username: string; display_name: string | null; pfp_url: string | null }>(
         `SELECT u.id,u.username,u.display_name,u.pfp_url
-         FROM users u
-         LEFT JOIN account_bans ab ON ab.user_id=u.id
-         WHERE ab.user_id IS NULL
-           AND u.id<>:senderId
-           AND u.id IN (${inList})`,
+         FROM users u LEFT JOIN account_bans ab ON ab.user_id=u.id
+         WHERE ab.user_id IS NULL AND u.id<>:senderId AND u.id IN (${inList})`,
         params
       );
       const foundIds = new Set(recipients.map((user) => user.id));
@@ -1566,41 +1556,19 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const summaryRecipients: Array<{ id: string; username: string; displayName: string | null; threadId: string }> = [];
 
     for (const recipient of recipients) {
-      const sent = await sendOfficialMessageToUser(recipient.id, body.content, {
-        officialAccount,
-        broadcastToUser,
-      });
-      if (!sent) {
-        skippedUserIds.push(recipient.id);
-        continue;
-      }
-
+      const sent = await sendOfficialMessageToUser(recipient.id, body.content, { officialAccount, broadcastToUser });
+      if (!sent) { skippedUserIds.push(recipient.id); continue; }
       if (summaryRecipients.length < 50) {
-        summaryRecipients.push({
-          id: recipient.id,
-          username: recipient.username,
-          displayName: recipient.display_name,
-          threadId: sent.threadId
-        });
+        summaryRecipients.push({ id: recipient.id, username: recipient.username, displayName: recipient.display_name, threadId: sent.threadId });
       }
     }
 
-    return {
-      ok: true,
-      recipientMode: body.recipientMode,
-      sentCount: recipients.length,
-      skippedUserIds,
-      recipients: summaryRecipients
-    };
+    return { ok: true, recipientMode: body.recipientMode, sentCount: recipients.length, skippedUserIds, recipients: summaryRecipients };
   });
 
   app.get("/v1/admin/panel-accounts", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
     const access = await requirePanelAccess(req);
-    if (
-      !access.isPlatformOwner &&
-      !access.isPlatformAdmin &&
-      !access.permissions.includes("manage_support")
-    ) {
+    if (!access.isPlatformOwner && !access.isPlatformAdmin && !access.permissions.includes("manage_support")) {
       return rep.code(403).send({ error: "FORBIDDEN" });
     }
 
@@ -1613,19 +1581,10 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
          FROM panel_admin_users pa
          LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
         ${query.includeDisabled ? "" : "WHERE pa.disabled_at IS NULL"}
-        ORDER BY
-          CASE pa.role
-            WHEN 'owner' THEN 0
-            WHEN 'admin' THEN 1
-            ELSE 2
-          END ASC,
-          pa.username ASC,
-          pa.created_at ASC`,
+        ORDER BY CASE pa.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END ASC,
+                 pa.username ASC, pa.created_at ASC`,
     );
-
-    return {
-      accounts: rows.map(mapPanelAdminAccount),
-    };
+    return { accounts: rows.map(mapPanelAdminAccount) };
   });
 
   app.post("/v1/admin/panel-accounts", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1641,15 +1600,10 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     const existing = await q<{ id: string }>(
-      `SELECT id
-         FROM panel_admin_users
-        WHERE LOWER(email)=LOWER(:email)
-        LIMIT 1`,
+      `SELECT id FROM panel_admin_users WHERE LOWER(email)=LOWER(:email) LIMIT 1`,
       { email: body.email.trim() },
     );
-    if (existing.length) {
-      return rep.code(409).send({ error: "ADMIN_EMAIL_EXISTS" });
-    }
+    if (existing.length) return rep.code(409).send({ error: "ADMIN_EMAIL_EXISTS" });
 
     const accountId = ulidLike();
     const passwordHash = await hashPassword(body.password);
@@ -1684,15 +1638,10 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
               pa.disabled_at, pa.last_login_at, pa.created_at, pa.updated_at
          FROM panel_admin_users pa
          LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
-        WHERE pa.id=:accountId
-        LIMIT 1`,
+        WHERE pa.id=:accountId LIMIT 1`,
       { accountId },
     );
-
-    return rep.code(201).send({
-      ok: true,
-      account: rows[0] ? mapPanelAdminAccount(rows[0]) : null,
-    });
+    return rep.code(201).send({ ok: true, account: rows[0] ? mapPanelAdminAccount(rows[0]) : null });
   });
 
   app.patch("/v1/admin/panel-accounts/:adminId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1712,8 +1661,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
               pa.disabled_at, pa.last_login_at, pa.created_at, pa.updated_at
          FROM panel_admin_users pa
          LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
-        WHERE pa.id=:adminId
-        LIMIT 1`,
+        WHERE pa.id=:adminId LIMIT 1`,
       { adminId },
     );
     const existing = rows[0];
@@ -1722,34 +1670,22 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const currentRole = existing.role;
     const nextRole = body.role || currentRole;
 
-    if (adminId === actorId && body.disabled === true) {
-      return rep.code(400).send({ error: "CANNOT_DISABLE_SELF" });
-    }
+    if (adminId === actorId && body.disabled === true) return rep.code(400).send({ error: "CANNOT_DISABLE_SELF" });
     if (adminId === actorId && body.role && panelRoleRank(body.role) < panelRoleRank(currentRole)) {
       return rep.code(400).send({ error: "CANNOT_DEMOTE_SELF" });
     }
 
     if (!access.isPlatformOwner) {
-      if (currentRole !== "staff") {
-        return rep.code(403).send({ error: "ONLY_OWNER_CAN_EDIT_PRIVILEGED_ROLES" });
-      }
-      if (nextRole !== "staff") {
-        return rep.code(403).send({ error: "ONLY_OWNER_CAN_PROMOTE_ROLES" });
-      }
+      if (currentRole !== "staff") return rep.code(403).send({ error: "ONLY_OWNER_CAN_EDIT_PRIVILEGED_ROLES" });
+      if (nextRole !== "staff") return rep.code(403).send({ error: "ONLY_OWNER_CAN_PROMOTE_ROLES" });
     }
 
     if (body.email && body.email.trim().toLowerCase() !== existing.email.trim().toLowerCase()) {
       const emailRows = await q<{ id: string }>(
-        `SELECT id
-           FROM panel_admin_users
-          WHERE LOWER(email)=LOWER(:email)
-            AND id<>:adminId
-          LIMIT 1`,
+        `SELECT id FROM panel_admin_users WHERE LOWER(email)=LOWER(:email) AND id<>:adminId LIMIT 1`,
         { email: body.email.trim(), adminId },
       );
-      if (emailRows.length) {
-        return rep.code(409).send({ error: "ADMIN_EMAIL_EXISTS" });
-      }
+      if (emailRows.length) return rep.code(409).send({ error: "ADMIN_EMAIL_EXISTS" });
     }
 
     const permissions = normalizePanelAccountPermissions(
@@ -1759,17 +1695,9 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     await q(
       `UPDATE panel_admin_users
-          SET email=:email,
-              username=:username,
-              role=:role,
-              title=:title,
-              permissions_json=:permissionsJson,
-              notes=:notes,
-              disabled_at=CASE
-                WHEN :disableMode=1 THEN NOW()
-                WHEN :disableMode=0 THEN NULL
-                ELSE disabled_at
-              END,
+          SET email=:email, username=:username, role=:role, title=:title,
+              permissions_json=:permissionsJson, notes=:notes,
+              disabled_at=CASE WHEN :disableMode=1 THEN NOW() WHEN :disableMode=0 THEN NULL ELSE disabled_at END,
               assigned_by=:actorId
         WHERE id=:adminId`,
       {
@@ -1787,10 +1715,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     if (body.disabled === true) {
       await q(
-        `UPDATE panel_admin_refresh_tokens
-            SET revoked_at=NOW()
-          WHERE admin_id=:adminId
-            AND revoked_at IS NULL`,
+        `UPDATE panel_admin_refresh_tokens SET revoked_at=NOW() WHERE admin_id=:adminId AND revoked_at IS NULL`,
         { adminId },
       );
     }
@@ -1802,15 +1727,10 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
               pa.disabled_at, pa.last_login_at, pa.created_at, pa.updated_at
          FROM panel_admin_users pa
          LEFT JOIN panel_admin_users assigner ON assigner.id=pa.assigned_by
-        WHERE pa.id=:adminId
-        LIMIT 1`,
+        WHERE pa.id=:adminId LIMIT 1`,
       { adminId },
     );
-
-    return {
-      ok: true,
-      account: updatedRows[0] ? mapPanelAdminAccount(updatedRows[0]) : null,
-    };
+    return { ok: true, account: updatedRows[0] ? mapPanelAdminAccount(updatedRows[0]) : null };
   });
 
   app.post("/v1/admin/panel-accounts/:adminId/password", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1824,16 +1744,10 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const body = parseBody(panelAccountPasswordBodySchema, req.body);
 
     const targetRows = await q<{ id: string; role: "owner" | "admin" | "staff" }>(
-      `SELECT id, role
-         FROM panel_admin_users
-        WHERE id=:adminId
-        LIMIT 1`,
+      `SELECT id, role FROM panel_admin_users WHERE id=:adminId LIMIT 1`,
       { adminId },
     );
-    if (!targetRows.length) {
-      return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
-    }
-
+    if (!targetRows.length) return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
     if (!access.isPlatformOwner && targetRows[0].role !== "staff") {
       return rep.code(403).send({ error: "ONLY_OWNER_CAN_RESET_PRIVILEGED_PASSWORDS" });
     }
@@ -1841,35 +1755,21 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const passwordHash = await hashPassword(body.password);
     await q(
       `UPDATE panel_admin_users
-          SET password_hash=:passwordHash,
-              two_factor_enabled=0,
-              force_two_factor_setup=1,
-              totp_secret_encrypted=NULL,
-              assigned_by=:actorId
+          SET password_hash=:passwordHash, two_factor_enabled=0,
+              force_two_factor_setup=1, totp_secret_encrypted=NULL, assigned_by=:actorId
         WHERE id=:adminId`,
-      {
-        adminId,
-        passwordHash,
-        actorId: actorId || null,
-      },
+      { adminId, passwordHash, actorId: actorId || null },
     );
 
     const shouldRevoke = body.revokeSessions !== false;
     if (shouldRevoke) {
       await q(
-        `UPDATE panel_admin_refresh_tokens
-            SET revoked_at=NOW()
-          WHERE admin_id=:adminId
-            AND revoked_at IS NULL`,
+        `UPDATE panel_admin_refresh_tokens SET revoked_at=NOW() WHERE admin_id=:adminId AND revoked_at IS NULL`,
         { adminId },
       );
     }
 
-    return {
-      ok: true,
-      adminId,
-      sessionsRevoked: shouldRevoke,
-    };
+    return { ok: true, adminId, sessionsRevoked: shouldRevoke };
   });
 
   app.get("/v1/admin/staff/schedules", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1882,23 +1782,17 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const parsed = panelStaffScheduleListQuerySchema.parse(req.query || {});
     const startDate = parsed.startDate || "1970-01-01";
     const endDate = parsed.endDate || "2999-12-31";
-    if (startDate > endDate) {
-      return rep.code(400).send({ error: "INVALID_DATE_RANGE" });
-    }
+    if (startDate > endDate) return rep.code(400).send({ error: "INVALID_DATE_RANGE" });
 
     const where: string[] = ["s.shift_date >= :startDate", "s.shift_date <= :endDate"];
     const params: Record<string, string> = { startDate, endDate };
-    if (parsed.adminId) {
-      where.push("s.admin_id=:adminId");
-      params.adminId = parsed.adminId;
-    }
+    if (parsed.adminId) { where.push("s.admin_id=:adminId"); params.adminId = parsed.adminId; }
 
     const rows = await q<PanelStaffScheduleRow>(
       `SELECT s.id, s.admin_id, s.shift_date, s.start_time, s.end_time, s.timezone,
               s.shift_type, s.note, s.created_by, creator.username AS created_by_username,
               s.updated_by, updater.username AS updated_by_username, s.created_at, s.updated_at,
-              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title,
-              pa.role AS admin_role
+              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title, pa.role AS admin_role
          FROM panel_staff_schedules s
          JOIN panel_admin_users pa ON pa.id=s.admin_id
          LEFT JOIN panel_admin_users creator ON creator.id=s.created_by
@@ -1908,13 +1802,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       params,
     );
 
-    return {
-      schedules: rows.map(mapPanelStaffSchedule),
-      range: {
-        startDate,
-        endDate,
-      },
-    };
+    return { schedules: rows.map(mapPanelStaffSchedule), range: { startDate, endDate } };
   });
 
   app.post("/v1/admin/staff/schedules", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -1932,16 +1820,10 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     const targetRows = await q<{ id: string }>(
-      `SELECT id
-         FROM panel_admin_users
-        WHERE id=:adminId
-          AND disabled_at IS NULL
-        LIMIT 1`,
+      `SELECT id FROM panel_admin_users WHERE id=:adminId AND disabled_at IS NULL LIMIT 1`,
       { adminId: body.adminId },
     );
-    if (!targetRows.length) {
-      return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
-    }
+    if (!targetRows.length) return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
 
     const actorId = getActorAdminId(req);
     const scheduleId = ulidLike();
@@ -1953,15 +1835,10 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
          :id, :adminId, :shiftDate, :startTime, :endTime, :timezone, :shiftType, :note, :actorId, :actorId
        )`,
       {
-        id: scheduleId,
-        adminId: body.adminId,
-        shiftDate: body.shiftDate,
-        startTime: body.startTime,
-        endTime: body.endTime,
-        timezone: body.timezone || "UTC",
-        shiftType: body.shiftType || "support",
-        note: body.note || null,
-        actorId: actorId || null,
+        id: scheduleId, adminId: body.adminId, shiftDate: body.shiftDate,
+        startTime: body.startTime, endTime: body.endTime,
+        timezone: body.timezone || "UTC", shiftType: body.shiftType || "support",
+        note: body.note || null, actorId: actorId || null,
       },
     );
 
@@ -1969,21 +1846,15 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       `SELECT s.id, s.admin_id, s.shift_date, s.start_time, s.end_time, s.timezone,
               s.shift_type, s.note, s.created_by, creator.username AS created_by_username,
               s.updated_by, updater.username AS updated_by_username, s.created_at, s.updated_at,
-              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title,
-              pa.role AS admin_role
+              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title, pa.role AS admin_role
          FROM panel_staff_schedules s
          JOIN panel_admin_users pa ON pa.id=s.admin_id
          LEFT JOIN panel_admin_users creator ON creator.id=s.created_by
          LEFT JOIN panel_admin_users updater ON updater.id=s.updated_by
-        WHERE s.id=:id
-        LIMIT 1`,
+        WHERE s.id=:id LIMIT 1`,
       { id: scheduleId },
     );
-
-    return rep.code(201).send({
-      ok: true,
-      schedule: rows[0] ? mapPanelStaffSchedule(rows[0]) : null,
-    });
+    return rep.code(201).send({ ok: true, schedule: rows[0] ? mapPanelStaffSchedule(rows[0]) : null });
   });
 
   app.put("/v1/admin/staff/schedules/:scheduleId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -2002,48 +1873,29 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     const targetRows = await q<{ id: string }>(
-      `SELECT id
-         FROM panel_admin_users
-        WHERE id=:adminId
-          AND disabled_at IS NULL
-        LIMIT 1`,
+      `SELECT id FROM panel_admin_users WHERE id=:adminId AND disabled_at IS NULL LIMIT 1`,
       { adminId: body.adminId },
     );
-    if (!targetRows.length) {
-      return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
-    }
+    if (!targetRows.length) return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
 
     const existingRows = await q<{ id: string }>(
       `SELECT id FROM panel_staff_schedules WHERE id=:scheduleId LIMIT 1`,
       { scheduleId },
     );
-    if (!existingRows.length) {
-      return rep.code(404).send({ error: "SCHEDULE_NOT_FOUND" });
-    }
+    if (!existingRows.length) return rep.code(404).send({ error: "SCHEDULE_NOT_FOUND" });
 
     const actorId = getActorAdminId(req);
 
     await q(
       `UPDATE panel_staff_schedules
-          SET admin_id=:adminId,
-              shift_date=:shiftDate,
-              start_time=:startTime,
-              end_time=:endTime,
-              timezone=:timezone,
-              shift_type=:shiftType,
-              note=:note,
-              updated_by=:actorId
+          SET admin_id=:adminId, shift_date=:shiftDate, start_time=:startTime, end_time=:endTime,
+              timezone=:timezone, shift_type=:shiftType, note=:note, updated_by=:actorId
         WHERE id=:scheduleId`,
       {
-        scheduleId,
-        adminId: body.adminId,
-        shiftDate: body.shiftDate,
-        startTime: body.startTime,
-        endTime: body.endTime,
-        timezone: body.timezone || "UTC",
-        shiftType: body.shiftType || "support",
-        note: body.note || null,
-        actorId: actorId || null,
+        scheduleId, adminId: body.adminId, shiftDate: body.shiftDate,
+        startTime: body.startTime, endTime: body.endTime,
+        timezone: body.timezone || "UTC", shiftType: body.shiftType || "support",
+        note: body.note || null, actorId: actorId || null,
       },
     );
 
@@ -2051,21 +1903,15 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       `SELECT s.id, s.admin_id, s.shift_date, s.start_time, s.end_time, s.timezone,
               s.shift_type, s.note, s.created_by, creator.username AS created_by_username,
               s.updated_by, updater.username AS updated_by_username, s.created_at, s.updated_at,
-              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title,
-              pa.role AS admin_role
+              pa.username AS admin_username, pa.email AS admin_email, pa.title AS admin_title, pa.role AS admin_role
          FROM panel_staff_schedules s
          JOIN panel_admin_users pa ON pa.id=s.admin_id
          LEFT JOIN panel_admin_users creator ON creator.id=s.created_by
          LEFT JOIN panel_admin_users updater ON updater.id=s.updated_by
-        WHERE s.id=:id
-        LIMIT 1`,
+        WHERE s.id=:id LIMIT 1`,
       { id: scheduleId },
     );
-
-    return {
-      ok: true,
-      schedule: rows[0] ? mapPanelStaffSchedule(rows[0]) : null,
-    };
+    return { ok: true, schedule: rows[0] ? mapPanelStaffSchedule(rows[0]) : null };
   });
 
   app.delete("/v1/admin/staff/schedules/:scheduleId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -2080,14 +1926,9 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       `SELECT id FROM panel_staff_schedules WHERE id=:scheduleId LIMIT 1`,
       { scheduleId },
     );
-    if (!existingRows.length) {
-      return rep.code(404).send({ error: "SCHEDULE_NOT_FOUND" });
-    }
+    if (!existingRows.length) return rep.code(404).send({ error: "SCHEDULE_NOT_FOUND" });
 
-    await q(
-      `DELETE FROM panel_staff_schedules WHERE id=:scheduleId`,
-      { scheduleId },
-    );
+    await q(`DELETE FROM panel_staff_schedules WHERE id=:scheduleId`, { scheduleId });
     return { ok: true, removedScheduleId: scheduleId };
   });
 
@@ -2096,7 +1937,6 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     if (!access.isPlatformOwner && !access.isPlatformAdmin) {
       return rep.code(403).send({ error: "INSUFFICIENT_ROLE" });
     }
-
     const staff = await listPanelStaffAssignments();
     return { staff };
   });
@@ -2111,11 +1951,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const { userId } = z.object({ userId: z.string().min(3) }).parse(req.params);
     const body = parseBody(staffAssignmentBodySchema, req.body);
     const target = await q<{ id: string; role: string }>(
-      `SELECT id,role
-       FROM panel_admin_users
-       WHERE id=:userId
-         AND disabled_at IS NULL
-       LIMIT 1`,
+      `SELECT id,role FROM panel_admin_users WHERE id=:userId AND disabled_at IS NULL LIMIT 1`,
       { userId },
     );
     if (!target.length) return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
@@ -2125,25 +1961,11 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     await q(
       `UPDATE panel_admin_users
-       SET role='staff',
-           title=:title,
-           permissions_json=:permissionsJson,
-           notes=:notes,
-           assigned_by=:actorId
+       SET role='staff', title=:title, permissions_json=:permissionsJson, notes=:notes, assigned_by=:actorId
        WHERE id=:userId`,
-      {
-        userId,
-        title: body.title,
-        permissionsJson: serializePlatformPermissions(body.permissions),
-        notes: body.notes || null,
-        actorId,
-      }
+      { userId, title: body.title, permissionsJson: serializePlatformPermissions(body.permissions), notes: body.notes || null, actorId }
     );
-
-    return {
-      ok: true,
-      assignment: await getPanelStaffAssignment(userId)
-    };
+    return { ok: true, assignment: await getPanelStaffAssignment(userId) };
   });
 
   app.delete("/v1/admin/staff/:userId", { preHandler: [app.authenticatePanelAdmin] } as any, async (req: any, rep) => {
@@ -2155,11 +1977,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     const { userId } = z.object({ userId: z.string().min(3) }).parse(req.params);
     const target = await q<{ id: string; role: string }>(
-      `SELECT id,role
-       FROM panel_admin_users
-       WHERE id=:userId
-         AND disabled_at IS NULL
-       LIMIT 1`,
+      `SELECT id,role FROM panel_admin_users WHERE id=:userId AND disabled_at IS NULL LIMIT 1`,
       { userId },
     );
     if (!target.length) return rep.code(404).send({ error: "ADMIN_ACCOUNT_NOT_FOUND" });
@@ -2168,12 +1986,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     }
 
     await q(
-      `UPDATE panel_admin_users
-       SET permissions_json='[]',
-           title='Staff',
-           notes=NULL,
-           assigned_by=:actorId
-       WHERE id=:userId`,
+      `UPDATE panel_admin_users SET permissions_json='[]', title='Staff', notes=NULL, assigned_by=:actorId WHERE id=:userId`,
       { userId, actorId },
     );
     return { ok: true, removedUserId: userId };

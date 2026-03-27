@@ -7046,6 +7046,44 @@ textarea { resize: vertical; min-height: clamp(80px, 13vw, 120px); font-size: 1e
   margin: var(--space-sm) 0;
 }
 
+.admin-client-form {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.admin-client-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+}
+
+.admin-client-release-notes {
+  width: 100%;
+}
+
+.admin-client-release-notes textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.admin-client-file-field input[type="file"] {
+  padding: var(--space-xs);
+}
+
+.admin-client-channel-filter {
+  display: grid;
+  gap: 6px;
+  min-width: 150px;
+  color: var(--text-soft);
+}
+
+.admin-client-channel-filter span {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
 .admin-op-log {
   margin: var(--space-sm) 0 0;
   padding: var(--space-sm);
