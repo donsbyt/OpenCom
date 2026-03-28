@@ -3,15 +3,11 @@
     "name": "OpenCom",
     "slug": "opencom-android",
     "version": "0.1.0",
-    "newArchEnabled": false,
     "orientation": "portrait",
     "scheme": "opencom",
     "userInterfaceStyle": "dark",
     "android": {
       "package": "online.opencom.mobile",
-      "compileSdkVersion": 36,
-      "targetSdkVersion": 36,
-      "minSdkVersion": 24,
       "permissions": [
         "POST_NOTIFICATIONS"
       ],
@@ -40,6 +36,22 @@
     },
     "extra": {
       "opencomCoreApiUrl": "https://api.opencom.online"
+    },
+    "plugins": [
+      "expo-asset",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35,
+            "minSdkVersion": 24
+          }
+        }
+      ]
+    ],
+    "ios": {
+      "bundleIdentifier": "online.opencom.mobile"
     }
   }
 }

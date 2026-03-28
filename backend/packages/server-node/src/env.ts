@@ -55,6 +55,13 @@ const Env = z.object({
     (value) => value ?? process.env.NODE_SYNC_SECRET,
     z.preprocess(emptyToUndefined, z.string().min(16).optional())
   ),
+  VOICE_STUN_URLS: z.preprocess(
+    emptyToUndefined,
+    z.string().default("stun:stun.l.google.com:19302")
+  ),
+  VOICE_TURN_URLS: z.preprocess(emptyToUndefined, z.string().optional()),
+  VOICE_TURN_SECRET: z.preprocess(emptyToUndefined, z.string().min(16).optional()),
+  VOICE_TURN_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
 
   MEDIASOUP_LISTEN_IP: z.string().default("0.0.0.0"),
   MEDIASOUP_ANNOUNCED_ADDRESS: z.preprocess(emptyToUndefined, z.string().optional()),
