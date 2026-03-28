@@ -97,6 +97,7 @@ const Env = z.object({
   // General attachment storage (channel + social DM uploads)
   ATTACHMENT_MAX_BYTES: z.coerce.number().int().min(1024).default(50 * 1024 * 1024),
   ATTACHMENT_BOOST_MAX_BYTES: z.coerce.number().int().min(1024).default(100 * 1024 * 1024),
+  CLIENT_UPLOAD_MAX_BYTES: z.coerce.number().int().min(1024).default(500 * 1024 * 1024),
   ATTACHMENT_TTL_DAYS: z.coerce.number().int().min(1).default(365),
   ATTACHMENT_STORAGE_DIR: z.string().default("./data/attachments"),
   STORAGE_PROVIDER: z.enum(["local", "s3"]).default("local"),

@@ -234,6 +234,9 @@ function describeApiError(payload, fallback) {
       .map((issue) => String(issue?.message || "Invalid value."))
       .join(" ");
   }
+  if (payload?.error === "TOO_LARGE" && Number(payload?.maxBytes) > 0) {
+    return `File is too large. Max upload size is ${formatFileSize(payload.maxBytes)}.`;
+  }
   return payload?.error || fallback;
 }
 

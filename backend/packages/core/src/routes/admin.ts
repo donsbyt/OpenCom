@@ -2,6 +2,8 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { ulidLike } from "@ods/shared/ids.js";
 import { q } from "../db.js";
 import { hashPassword } from "../crypto.js";
@@ -95,26 +97,47 @@ function resolveClientPlatform(filename: string): ClientPlatform | null {
   return EXT_TO_PLATFORM[ext] ?? null;
 }
 
-function sha256Hex(buffer: Buffer): string {
-  return crypto.createHash("sha256").update(buffer).digest("hex");
-}
-
-function saveClientFile(
+async function saveClientFile(
   storageDir: string,
   platform: ClientPlatform,
   version: string,
-  buffer: Buffer,
+  source: NodeJS.ReadableStream,
   mimeType: string,
-): string | null {
+  maxBytes: number,
+): Promise<{ filePath: string; fileSize: number; checksum: string } | null> {
   const ext = CLIENT_MIME_TO_EXT[mimeType] ?? "bin";
   const clientDir = path.join(storageDir, "clients", platform);
+  const filename = `${platform}_${version}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
+  const filepath = path.join(clientDir, filename);
+  const relativePath = `clients/${platform}/${filename}`;
   try {
     fs.mkdirSync(clientDir, { recursive: true });
-    const filename = `${platform}_${version}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
-    const filepath = path.join(clientDir, filename);
-    fs.writeFileSync(filepath, buffer, { flag: "w" });
-    return `clients/${platform}/${filename}`;
-  } catch {
+    const hash = crypto.createHash("sha256");
+    let fileSize = 0;
+    const out = fs.createWriteStream(filepath, { flags: "w" });
+    const hasher = new Transform({
+      transform(chunk, _encoding, callback) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        fileSize += buf.length;
+        if (fileSize > maxBytes) {
+          callback(new Error("TOO_LARGE"));
+          return;
+        }
+        hash.update(buf);
+        callback(null, buf);
+      },
+    });
+
+    await pipeline(source, hasher, out);
+    if (!fileSize) {
+      try { fs.unlinkSync(filepath); } catch {}
+      return null;
+    }
+
+    return { filePath: relativePath, fileSize, checksum: hash.digest("hex") };
+  } catch (error) {
+    try { fs.unlinkSync(filepath); } catch {}
+    if ((error as Error)?.message === "TOO_LARGE") throw error;
     return null;
   }
 }
@@ -917,7 +940,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
 
     const actorId = getActorAdminId(req);
 
-    const data = await req.file({ limits: { fileSize: 500 * 1024 * 1024 } });
+    const data = await req.file({ limits: { fileSize: env.CLIENT_UPLOAD_MAX_BYTES } });
     if (!data) return rep.code(400).send({ error: "MISSING_FILE" });
 
     const fieldsParsed = CLIENT_UPLOAD_FIELDS.safeParse(data.fields ?? {});
@@ -936,21 +959,34 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
       return rep.code(400).send({ error: "UNRECOGNISED_PLATFORM", hint: "Cannot determine target platform from file extension." });
     }
 
-    const buffer = await data.toBuffer();
-    if (!buffer.length) return rep.code(400).send({ error: "EMPTY_FILE" });
-
-    const checksum = sha256Hex(buffer);
-    const fileSize = buffer.length;
     const originalFilename = data.filename ?? `${platform}_${version}`;
+    let saved: { filePath: string; fileSize: number; checksum: string } | null = null;
+    try {
+      saved = await saveClientFile(
+        env.PROFILE_IMAGE_STORAGE_DIR,
+        platform,
+        version,
+        data.file,
+        mime,
+        env.CLIENT_UPLOAD_MAX_BYTES,
+      );
+    } catch (error) {
+      if ((error as Error)?.message === "TOO_LARGE" || data.file?.truncated) {
+        return rep.code(413).send({ error: "TOO_LARGE", maxBytes: env.CLIENT_UPLOAD_MAX_BYTES });
+      }
+      throw error;
+    }
+    if (!saved) {
+      return rep.code(500).send({ error: "SAVE_FAILED" });
+    }
 
-    const saved = saveClientFile(env.PROFILE_IMAGE_STORAGE_DIR, platform, version, buffer, mime);
-    if (!saved) return rep.code(500).send({ error: "SAVE_FAILED" });
+    const { filePath: savedPath, fileSize, checksum } = saved;
 
     if (isS3StorageEnabled()) {
       try {
-        await uploadFileToObjectStorage("clients", saved, path.join(env.PROFILE_IMAGE_STORAGE_DIR, saved), mime);
+        await uploadFileToObjectStorage("clients", savedPath, path.join(env.PROFILE_IMAGE_STORAGE_DIR, savedPath), mime);
       } catch {
-        deleteProfileImage(env.PROFILE_IMAGE_STORAGE_DIR, saved);
+        deleteProfileImage(env.PROFILE_IMAGE_STORAGE_DIR, savedPath);
         return rep.code(500).send({ error: "OBJECT_STORAGE_FAILED" });
       }
     }
@@ -963,9 +999,9 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
     const clientId = ulidLike();
     await q(
       `INSERT INTO client (
-         id, type, version, channel,
-         file_path, file_name, mime_type, file_size,
-         checksum_sha256, is_active, release_notes, uploaded_by
+        id, type, version, channel,
+        file_path, file_name, mime_type, file_size,
+        checksum_sha256, is_active, release_notes, uploaded_by
        ) VALUES (
          :id, :type, :version, :channel,
          :filePath, :fileName, :mimeType, :fileSize,
@@ -976,7 +1012,7 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
         type: platform,
         version,
         channel,
-        filePath: saved,
+        filePath: savedPath,
         fileName: originalFilename,
         mimeType: mime,
         fileSize,
@@ -993,12 +1029,12 @@ export async function adminRoutes(app: FastifyInstance, broadcastToUser?: Broadc
         type: platform,
         version,
         channel,
-        filePath: saved,
+        filePath: savedPath,
         fileName: originalFilename,
         mimeType: mime,
         fileSize,
         checksum,
-        downloadUrl: `${env.PROFILE_IMAGE_BASE_URL}/${saved}`,
+        downloadUrl: `${env.PROFILE_IMAGE_BASE_URL}/${savedPath}`,
         releaseNotes: releaseNotes ?? null,
       },
     });
