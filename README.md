@@ -1,117 +1,137 @@
+**NOTICE: I used AI to help fix some of my documentation and it decided to rewrite files I told it not to, And I have recently reset my pc and missed this , I must appologise for the slop documentation it has pushed will try not to do in future :pray**
+
 # OpenCom
 
-OpenCom is an open source communication platform with a split architecture:
+An open source communication platform
 
-- `backend/packages/core`: central platform API for accounts, auth, social features, invites, and platform services
-- `backend/packages/server-node`: server-hosted guild, channel, message, attachment, and voice functionality
-- `frontend`: main web client
-- `panel`: standalone platform admin panel
-- `client`: desktop Electron wrapper around the web client
-- `mobile/opencom-android`: Expo-based Android client
-- `Extensions`: server and client extension projects plus the extension SDK
-- `support`: support portal for public tickets and staff ticket handling
+## Info:
 
-## What the repo includes
+- This is a README rewrite as my prior one was written by AI and im not particualrly proud of that, so we ball ig. Please notify / tell me of any misisng bits and I will get to them anyways we ball ig.
 
-### Platform services
+- This is gonna be as comprehensive as I can write it easily, but please note there may or may not be some difficulties due ot my admitadly lack of skill at README's [:sob:]
 
-- Account registration, login, refresh, and session management
-- Presence, profile, invite, and server registry flows
-- Direct messages, friend requests, and social graph features
-- Guilds, channels, roles, moderation, attachments, and voice
-- Extension loading and server-side command execution
+- Anyways for the people who are about to read my extravaganzer of a readme Good luck kind soul :pray:
 
-### Client surfaces
+## Feature List:
 
-- Web client for the main day-to-day product experience
-- Desktop wrapper with a local rich-presence bridge
-- Android client for mobile access
-- Admin panel and support portal for operations workflows
+**[NOTE IF ITS MISSING SOMETHING PLEASE JUST OPEN A ISSUE AND IT WILL BE FIXED]**
 
-## Quick start
+**OpenCom Core**
 
-### Prerequisites
+- Account Management Endpoints
 
-- Node.js 22 or newer for backend development
-- npm
-- Docker with Compose support for the easiest local database/Redis setup
+- Private DMS
 
-### Recommended local setup
+- Main gateway handelling 
 
-```bash
-./scripts/dev/setup.sh all
-./scripts/dev/setup-database.sh --with-docker
-./scripts/dev/start.sh all
-```
+- Boost Handelling
 
-Default local URLs:
+- Invite Service
 
-- Frontend: `http://localhost:5173`
-- Core API: `http://localhost:3001`
-- Server Node: `http://localhost:3002`
-- Admin panel: `http://localhost:5175`
-- Support portal: `http://localhost:5174` when run separately
+- The officail account / messaging service stuff
 
-## Common development commands
+**OpenCom Node**
 
-### Start services
+- **Official Node**
+  - Server handelling for non self hosted
+  - Server handelling in general
+  - All features included in self hosted
+  - running the official server admin panel [I think may be wrong tho, this codebase is massive lmfao]
 
-```bash
-./scripts/dev/start.sh all
-./scripts/dev/start.sh backend
-./scripts/dev/start.sh frontend
-./scripts/dev/start.sh panel
-```
+- **Self Hosted**
+  - Server Creation hosted purely by user
+  - Channels / Categories [similar to discord]
+  - Voice Calls / Channels
+  - Roles
+  - Fully functional guild stuff
 
-### Rebuild a broken local environment
+**OpenCom Frontend**
 
-```bash
-./scripts/dev/reconfigure.sh --yes
-```
+**[NOTE IF YOU ARE USING OPENCOM AS IN THE MAIN PLATFORM THIS IS NOT SELF HOSTED]**
 
-This regenerates local env files, clears generated backend runtime state, recreates the local database stack, and reruns migrations. Add `--with-minio` to include the optional object-storage stack.
+- Fully inclusive frontend [ig this is obvious but like we ball ig]
 
-### Docs preview
+- DM's 
 
-```bash
-./scripts/docs/serve.sh
-```
+- Server interaction layer
 
-### Docker launchers
+- I'm negl i have no idea how to explain the frontend but the gist is here so enjoy ig as said im bad at this
 
-The helper launchers in `./docker/` wrap the Docker-based workflows:
 
-- `./docker/dev` for local development
-- `./docker/prod` for production-style local runs
 
-Examples:
+## Project Roadmap
 
-```bash
-./docker/dev all
-./docker/dev up node
-./docker/prod up all
-./docker/prod status
-```
+**TODO LIST**
+ 
+- [x] Finish Mobile APP [maybe this is a 50/50]
 
-## Self-hosted server node workflow
+- [x] Add more callbacks to the github in the frontend
 
-If your goal is to create and run a self-hosted node:
+- [x] Overall improvemnets to the platform
 
-```bash
-./scripts/ops/create-server.sh
-./scripts/ops/start-server.sh <server-name>
-```
+- [x] Make the actual day to day running of OpenCom easier for both self hosted and core
 
-If those scripts do not match your environment cleanly yet, please open an issue or pull request. Keeping self-hosting practical is an active goal for the project.
+- [x] Improve Client handelling
 
-## Documentation map
+- [ ] Make .deb Package actually have the icon [for some reason it dosent]
 
-- `docs/SETUP_GUIDE.md`: local setup and environment guidance
-- `docs/PLATFORM_GUIDE.md`: platform capabilities and API surface
-- `docs/extensions-sdk.md`: extension SDK guide
-- `docs/README.md`: static docs portal notes
-- `CONTRIBUTING.md`: contributor workflow and documentation expectations
+- [x] Overall improve everything else [more just small improvements to small for individual mentions]
+
+
+## Hosting A server node
+
+Im assuming this is what most of you are here for so here it goes.
+
+- simply its going to scripts/ops and running ./create-server.sh and following through the args in that
+
+- then once having setup the node running ./start-server.sh {server-name}
+
+- In an ideal world this should just be this simple if its not please open a issue or pull request and i'll get to fixing it
+
 
 ## Support the project
 
-OpenCom includes an in-app boost subscription flow for people who want to support hosting and ongoing development. Using the platform, opening issues, improving docs, and contributing fixes are all valuable forms of support too.
+**[NOTE THIS PURELY OPTIONAL ANYTHING DONE WILL BE A MASSIVE HELP IN THE DAY TO DAY RUNNING AND DEVELOPMENT OF THIS]**
+
+The sole and only way to really support OpenCom is through the boost subscription service offered within the application, this is designed to help fund the platform as I have done it to make it as fully functioanl without boost whilst also making it worth it to those looking to support :). 
+
+
+## Actually running the project
+
+**[THIS IS DESIGNED FOR IF YOU ACTUALLY HAVE IT ALREADY SETUP IN A ENV]**
+
+- Cd into the dir
+
+- Run ./start.sh [ or docker-compose up / docker compose up (if thats working)]
+
+- In either case ensure it runs correctly 
+
+## Dev reset / reconfigure
+
+- If your local config is cooked and you just want to wipe it all and rebuild it cleanly, run `./scripts/dev/reconfigure.sh --yes`
+
+- That will regenerate `backend/.env` + `frontend/.env`, clear local backend runtime state, recreate the local database stack, and rerun migrations
+
+- If you want the optional local object storage too, use `./scripts/dev/reconfigure.sh --yes --with-minio`
+
+## Docker launchers
+
+- You can now use `./docker/dev` for local Docker-driven development and `./docker/prod` for Docker-run hosting
+
+- Both support `all` or `node`
+
+- `all` starts the full stack: databases, redis, core, node, and frontend
+
+- `node` starts the backend-only stack: databases, redis, core, and node
+
+- First `./docker/dev up ...` run does a best-effort backup and then a full `reconfigure`
+
+- First `./docker/prod up ...` run just does the best-effort backup and leaves your config alone
+
+- Example: `./docker/dev all`
+
+- Example: `./docker/dev up node`
+
+- Example: `./docker/prod up all`
+
+- Example: `./docker/prod status`
