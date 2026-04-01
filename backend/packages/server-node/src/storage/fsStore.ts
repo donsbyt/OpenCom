@@ -19,7 +19,9 @@ export function buildPath(root: string, parts: string[]) {
   // prevent path traversal
   const normRoot = path.resolve(root);
   const normP = path.resolve(p);
-  if (!normP.startsWith(normRoot)) throw new Error("INVALID_PATH");
+  if (!normP.startsWith(`${normRoot}${path.sep}`) && normP !== normRoot) {
+    throw new Error("INVALID_PATH");
+  }
   return normP;
 }
 

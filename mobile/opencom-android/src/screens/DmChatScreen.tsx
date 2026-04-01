@@ -244,6 +244,7 @@ export function DmChatScreen({
   const listRef = useRef<FlatList>(null);
   const isAtBottomRef = useRef(true);
   const lastVisibleMessageIdRef = useRef("");
+  const latestMessagesRef = useRef<DmMessageApi[]>([]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const participantPresence = presenceByUserId[thread.participantId];
@@ -311,6 +312,10 @@ export function DmChatScreen({
     }
     loadMessages().finally(() => setLoading(false));
   }, [thread.id]); // eslint-disable-line
+
+  useEffect(() => {
+    latestMessagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     if (!cachedThreadMessages) return;
@@ -388,16 +393,19 @@ export function DmChatScreen({
     setSending(true);
     setStatus("");
     try {
-      await api.sendDmMessage(thread.id, content, {
+      const sent = await api.sendDmMessage(thread.id, content, {
         replyToId: replyTarget?.id ?? null,
         attachmentIds,
       });
       setComposer("");
       setReplyTarget(null);
       setPendingAttachments([]);
-      // Refresh to get full message data (real-time may not always fire)
-      await loadMessages();
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+      setTimeout(() => {
+        if (!latestMessagesRef.current.some((message) => message.id === sent.id)) {
+          void loadMessages();
+        }
+      }, 1500);
     } catch {
       setStatus("Failed to send message.");
     } finally {

@@ -47,11 +47,11 @@ function formatLastTime(iso: string | null | undefined): string {
 
 export function DmsScreen({ onSelectDm }: DmsScreenProps) {
   const {
-    api,
     presenceByUserId,
     dmThreads,
     dmMessages,
-    setDmThreads,
+    dmThreadsLoaded,
+    refreshDmThreads,
   } = useAuth();
 
   const [loading, setLoading] = useState(true);
@@ -62,8 +62,7 @@ export function DmsScreen({ onSelectDm }: DmsScreenProps) {
       if (!silent) setLoading(true);
       setStatus("");
       try {
-        const data = await api.getDms();
-        setDmThreads((data.dms ?? []) as DmThreadApi[]);
+        await refreshDmThreads({ force: silent });
       } catch {
         setStatus("Failed to load messages.");
       } finally {
@@ -71,12 +70,16 @@ export function DmsScreen({ onSelectDm }: DmsScreenProps) {
         setRefreshing(false);
       }
     },
-    [api, setDmThreads],
+    [refreshDmThreads],
   );
 
   useEffect(() => {
+    if (dmThreadsLoaded) {
+      setLoading(false);
+      return;
+    }
     loadDms();
-  }, [loadDms]);
+  }, [dmThreadsLoaded, loadDms]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);

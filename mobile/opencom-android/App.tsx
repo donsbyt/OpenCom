@@ -5,6 +5,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Linking,
   Modal,
   Pressable,
@@ -562,6 +563,7 @@ function AppContent() {
     servers,
     refreshServers,
     refreshMyProfile,
+    refreshDmThreads,
     api,
     coreApiUrl,
     selfStatus,
@@ -586,6 +588,9 @@ function AppContent() {
   const navigationRef = useRef<any>(null);
   const pendingDeepLinkRef = useRef<DeepLinkTarget | null>(null);
   const coreGatewayRef = useRef<CoreGatewayController | null>(null);
+  const appStateRef = useRef(AppState.currentState);
+  const lastBackgroundedAtRef = useRef<number | null>(null);
+  const foregroundSyncRef = useRef<Promise<void> | null>(null);
 
   const getApiErrorCode = useCallback((error: unknown) => {
     const raw = error instanceof Error ? error.message : String(error || "");
@@ -614,10 +619,10 @@ function AppContent() {
         dmThreads.find((item) => item.id === normalizedThreadId) || null;
 
       if (!thread) {
-        const data = await api.getDms().catch(() => null);
-        const nextThreads = data?.dms ?? [];
+        const nextThreads = await refreshDmThreads({ force: true }).catch(
+          () => [],
+        );
         if (nextThreads.length) {
-          setDmThreads(nextThreads);
           thread =
             nextThreads.find((item) => item.id === normalizedThreadId) || null;
         }
@@ -628,7 +633,7 @@ function AppContent() {
       navigationRef.current.navigate("DmChat", { thread });
       return true;
     },
-    [api, dmThreads, setDmThreads],
+    [dmThreads, refreshDmThreads],
   );
 
   const openServerChannelTarget = useCallback(
@@ -768,6 +773,25 @@ function AppContent() {
     });
   }, [tokens?.accessToken, selfStatus, selfCustomStatus]);
 
+  const refreshRealtimeState = useCallback(
+    async (options?: { forceDmThreads?: boolean }) => {
+      if (!tokens?.accessToken) return;
+      if (foregroundSyncRef.current) return foregroundSyncRef.current;
+
+      const task = Promise.allSettled([
+        refreshServers(),
+        refreshMyProfile(),
+        refreshDmThreads({ force: options?.forceDmThreads }),
+      ]).then(() => undefined);
+
+      foregroundSyncRef.current = task.finally(() => {
+        foregroundSyncRef.current = null;
+      });
+      return foregroundSyncRef.current;
+    },
+    [tokens?.accessToken, refreshDmThreads, refreshMyProfile, refreshServers],
+  );
+
   // ── Core gateway ─────────────────────────────────────────────────────────────
   // Handles real-time DMs, presence, and call events globally.
   const coreGateway = useCoreGateway({
@@ -807,10 +831,7 @@ function AppContent() {
             // If thread unknown, refresh thread list
             setDmThreads((prev) => {
               if (!prev.some((t) => t.id === event.threadId)) {
-                api
-                  .getDms()
-                  .then((data) => setDmThreads(data.dms ?? []))
-                  .catch(() => {});
+                void refreshDmThreads();
               }
               return prev;
             });
@@ -839,10 +860,7 @@ function AppContent() {
             break;
 
           case "FRIEND_ACCEPTED":
-            api
-              .getDms()
-              .then((data) => setDmThreads(data.dms ?? []))
-              .catch(() => {});
+            void refreshDmThreads({ force: true });
             break;
 
           default:
@@ -850,9 +868,9 @@ function AppContent() {
         }
       },
       [
-        api,
         me?.id,
         queueIncomingCall,
+        refreshDmThreads,
         removeDmMessage,
         sendSelfPresence,
         setDmThreads,
@@ -892,6 +910,7 @@ function AppContent() {
         setMe({ id: login.user.id, username: login.user.username });
         setAuthStatus("");
         await refreshServers();
+        refreshDmThreads({ force: true }).catch(() => {});
         // Load full profile after sign in
         refreshMyProfile().catch(() => {});
       } catch (error: unknown) {
@@ -919,7 +938,15 @@ function AppContent() {
         setAuthStatus(code);
       }
     },
-    [api, getApiErrorCode, setTokens, setMe, refreshServers, refreshMyProfile],
+    [
+      api,
+      getApiErrorCode,
+      setTokens,
+      setMe,
+      refreshDmThreads,
+      refreshServers,
+      refreshMyProfile,
+    ],
   );
 
   const handleForgotPassword = useCallback(
@@ -1069,6 +1096,7 @@ function AppContent() {
         try {
           await setTokens(stored);
           await refreshServers();
+          refreshDmThreads({ force: true }).catch(() => {});
           // Load full profile in the background
           refreshMyProfile().catch(() => {});
         } catch {
@@ -1121,7 +1149,7 @@ function AppContent() {
     // Notification received while foregrounded → refresh servers
     const notifReceiveSub = Notifications.addNotificationReceivedListener(
       () => {
-        void refreshServers();
+        void refreshRealtimeState({ forceDmThreads: true });
       },
     );
 
@@ -1134,10 +1162,39 @@ function AppContent() {
   }, [
     handleIncomingUrl,
     handleNotificationCallData,
-    refreshServers,
+    refreshDmThreads,
     refreshMyProfile,
+    refreshRealtimeState,
+    refreshServers,
     setTokens,
   ]);
+
+  useEffect(() => {
+    if (!tokens?.accessToken) return;
+
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const previousState = appStateRef.current;
+      appStateRef.current = nextState;
+
+      if (nextState === "active") {
+        const backgroundDuration = lastBackgroundedAtRef.current
+          ? Date.now() - lastBackgroundedAtRef.current
+          : 0;
+        lastBackgroundedAtRef.current = null;
+        void refreshRealtimeState({ forceDmThreads: backgroundDuration > 15_000 });
+        sendSelfPresence();
+        return;
+      }
+
+      if (previousState === "active") {
+        lastBackgroundedAtRef.current = Date.now();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [tokens?.accessToken, refreshRealtimeState, sendSelfPresence]);
 
   // ── Pending deep link after sign in ───────────────────────────────────────────
 

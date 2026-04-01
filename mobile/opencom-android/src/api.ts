@@ -1,4 +1,10 @@
 import { Platform } from "react-native";
+import {
+  normalizeAuthTokens,
+  runSingleFlightAccessTokenRefresh,
+  runSingleFlightMembershipTokenRefresh,
+  withBearerAuthorization,
+} from "./authSession";
 import type {
   AuthTokens,
   BoostGift,
@@ -48,9 +54,10 @@ export function createApiClient(input: {
     retry = true,
   ): Promise<T> {
     const tokens = input.getTokens();
-    const headers = new Headers(options.headers || {});
-    if (tokens?.accessToken)
-      headers.set("Authorization", `Bearer ${tokens.accessToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      tokens?.accessToken,
+    );
     if (options.body !== undefined)
       headers.set("Content-Type", "application/json");
 
@@ -76,8 +83,10 @@ export function createApiClient(input: {
     options: RequestOptions = {},
     retry = true,
   ): Promise<T> {
-    const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${server.membershipToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      server.membershipToken,
+    );
     if (options.body !== undefined)
       headers.set("Content-Type", "application/json");
 
@@ -109,8 +118,10 @@ export function createApiClient(input: {
     options: RequestOptions & { rawBody?: FormData } = {},
     retry = true,
   ): Promise<Response> {
-    const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${server.membershipToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      server.membershipToken,
+    );
 
     const response = await fetch(
       `${server.baseUrl.replace(/\/$/, "")}${path}`,
@@ -138,9 +149,10 @@ export function createApiClient(input: {
     retry = true,
   ): Promise<Response> {
     const tokens = input.getTokens();
-    const headers = new Headers(options.headers || {});
-    if (tokens?.accessToken)
-      headers.set("Authorization", `Bearer ${tokens.accessToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      tokens?.accessToken,
+    );
 
     const response = await fetch(`${coreBase}${path}`, {
       method: options.method || "POST",
@@ -157,45 +169,51 @@ export function createApiClient(input: {
   }
 
   async function refreshAccessToken(): Promise<AuthTokens | null> {
-    const tokens = input.getTokens();
-    if (!tokens?.refreshToken) return null;
+    return runSingleFlightAccessTokenRefresh(async () => {
+      const tokens = input.getTokens();
+      if (!tokens?.refreshToken) return null;
 
-    const response = await fetch(`${coreBase}/v1/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+      const response = await fetch(`${coreBase}/v1/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+      });
+      if (!response.ok) {
+        await input.setTokens(null);
+        return null;
+      }
+
+      const data = (await response.json()) as {
+        accessToken?: string;
+        refreshToken?: string;
+      };
+      const next = normalizeAuthTokens({
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
+      });
+      if (!next) {
+        await input.setTokens(null);
+        return null;
+      }
+
+      await input.setTokens(next);
+      return next;
     });
-    if (!response.ok) {
-      await input.setTokens(null);
-      return null;
-    }
-
-    const data = (await response.json()) as {
-      accessToken?: string;
-      refreshToken?: string;
-    };
-    if (!data.accessToken || !data.refreshToken) {
-      await input.setTokens(null);
-      return null;
-    }
-    const next = {
-      accessToken: data.accessToken,
-      refreshToken: data.refreshToken,
-    };
-    await input.setTokens(next);
-    return next;
   }
 
   async function refreshMembershipToken(
     serverId: string,
   ): Promise<string | null> {
-    const response = await coreRequest<{ membershipToken: string }>(
-      `/v1/servers/${encodeURIComponent(serverId)}/membership-token`,
-      { method: "POST" },
-    );
-    if (!response.membershipToken) return null;
-    input.updateServerMembershipToken(serverId, response.membershipToken);
-    return response.membershipToken;
+    return runSingleFlightMembershipTokenRefresh(serverId, async () => {
+      const response = await coreRequest<{ membershipToken: string }>(
+        `/v1/servers/${encodeURIComponent(serverId)}/membership-token`,
+        { method: "POST" },
+      );
+      const membershipToken = String(response.membershipToken || "").trim();
+      if (!membershipToken) return null;
+      input.updateServerMembershipToken(serverId, membershipToken);
+      return membershipToken;
+    });
   }
 
   return {

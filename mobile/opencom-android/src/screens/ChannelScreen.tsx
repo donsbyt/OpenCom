@@ -595,6 +595,7 @@ export function ChannelScreen({
 
   const listRef = useRef<FlatList>(null);
   const isAtBottomRef = useRef(true);
+  const latestMessagesRef = useRef<ChannelMessage[]>([]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const isVoice = isVoiceChannel(channel);
@@ -664,6 +665,10 @@ export function ChannelScreen({
     };
     run();
   }, [channel.id]); // eslint-disable-line
+
+  useEffect(() => {
+    latestMessagesRef.current = messages;
+  }, [messages]);
 
   // ── Node gateway for real-time channel updates ─────────────────────────────
   useNodeGateway({
@@ -829,16 +834,19 @@ export function ChannelScreen({
     setSending(true);
     setStatus("");
     try {
-      await api.sendMessage(server, channel.id, content, {
+      const sent = await api.sendMessage(server, channel.id, content, {
         replyToId: replyTarget?.id ?? null,
         attachmentIds,
       });
       setComposer("");
       setReplyTarget(null);
       setPendingAttachments([]);
-      // Real-time will add the message, but also refresh as fallback
-      await loadMessages();
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+      setTimeout(() => {
+        if (!latestMessagesRef.current.some((message) => message.id === sent.id)) {
+          void loadMessages();
+        }
+      }, 1500);
     } catch {
       setStatus("Failed to send message.");
     } finally {

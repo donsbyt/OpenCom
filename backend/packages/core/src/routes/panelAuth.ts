@@ -1,8 +1,9 @@
 import { FastifyInstance } from "fastify";
+import type { ResultSetHeader } from "mysql2/promise";
 import { z } from "zod";
 import crypto from "node:crypto";
 import { ulidLike } from "@ods/shared/ids.js";
-import { q } from "../db.js";
+import { pool, q } from "../db.js";
 import { verifyPassword, sha256Hex } from "../crypto.js";
 import { parseBody } from "../validation.js";
 import {
@@ -511,73 +512,101 @@ export async function panelAuthRoutes(app: FastifyInstance) {
   app.post("/v1/panel/auth/refresh", async (req, rep) => {
     const body = parseBody(PanelRefreshBody, req.body);
     const tokenHash = sha256Hex(body.refreshToken);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
 
-    const rows = await q<{
-      id: string;
-      admin_id: string;
-      revoked_at: string | null;
-      expires_at: string;
-      disabled_at: string | null;
-      two_factor_enabled: number;
-      totp_secret_encrypted: string | null;
-    }>(
-      `SELECT rt.id,rt.admin_id,rt.revoked_at,rt.expires_at,
-              pa.disabled_at,pa.two_factor_enabled,pa.totp_secret_encrypted
-         FROM panel_admin_refresh_tokens rt
-         JOIN panel_admin_users pa ON pa.id=rt.admin_id
-        WHERE rt.token_hash=:tokenHash
-        LIMIT 1`,
-      { tokenHash },
-    );
+      const [rows] = await connection.query<{
+        id: string;
+        admin_id: string;
+        revoked_at: string | null;
+        expires_at: string;
+        disabled_at: string | null;
+        two_factor_enabled: number;
+        totp_secret_encrypted: string | null;
+      }[]>(
+        `SELECT rt.id,rt.admin_id,rt.revoked_at,rt.expires_at,
+                pa.disabled_at,pa.two_factor_enabled,pa.totp_secret_encrypted
+           FROM panel_admin_refresh_tokens rt
+           JOIN panel_admin_users pa ON pa.id=rt.admin_id
+          WHERE rt.token_hash=:tokenHash
+          LIMIT 1
+          FOR UPDATE`,
+        { tokenHash },
+      );
 
-    if (!rows.length) return rep.code(401).send({ error: "INVALID_REFRESH" });
+      if (!rows.length) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "INVALID_REFRESH" });
+      }
 
-    const refresh = rows[0];
-    if (refresh.revoked_at) return rep.code(401).send({ error: "REFRESH_REVOKED" });
-    if (new Date(refresh.expires_at).getTime() < Date.now()) {
-      return rep.code(401).send({ error: "REFRESH_EXPIRED" });
+      const refresh = rows[0];
+      if (refresh.revoked_at) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "REFRESH_REVOKED" });
+      }
+      if (new Date(refresh.expires_at).getTime() < Date.now()) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "REFRESH_EXPIRED" });
+      }
+      if (refresh.disabled_at) {
+        await connection.rollback();
+        return rep.code(403).send({ error: "ACCOUNT_DISABLED" });
+      }
+      if (!refresh.two_factor_enabled || !refresh.totp_secret_encrypted) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "TWO_FACTOR_REQUIRED" });
+      }
+
+      const [revokeResult] = await connection.execute<ResultSetHeader>(
+        `UPDATE panel_admin_refresh_tokens
+         SET revoked_at=NOW()
+         WHERE id=:id
+           AND revoked_at IS NULL`,
+        { id: refresh.id },
+      );
+      if (revokeResult.affectedRows !== 1) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "REFRESH_REVOKED" });
+      }
+
+      const nextRefreshToken = randomToken();
+      const nextRefreshTokenHash = sha256Hex(nextRefreshToken);
+      const nextRefreshId = ulidLike();
+      const nextRefreshExpiresAt = toSqlTimestamp(Date.now() + PANEL_REFRESH_TOKEN_TTL_MS);
+
+      await connection.query(
+        `INSERT INTO panel_admin_refresh_tokens (id,admin_id,token_hash,expires_at)
+         VALUES (:id,:adminId,:tokenHash,:expiresAt)`,
+        {
+          id: nextRefreshId,
+          adminId: refresh.admin_id,
+          tokenHash: nextRefreshTokenHash,
+          expiresAt: nextRefreshExpiresAt,
+        },
+      );
+
+      await connection.commit();
+
+      const accessToken = app.jwt.sign(
+        { sub: refresh.admin_id, typ: "panel_access", scope: "panel_admin" },
+        { expiresIn: PANEL_ACCESS_TOKEN_TTL },
+      );
+
+      const status = await buildPanelStatus(refresh.admin_id);
+      if (!status) return rep.code(401).send({ error: "UNAUTHORIZED" });
+
+      return rep.send({
+        accessToken,
+        refreshToken: nextRefreshToken,
+        admin: status,
+      });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
     }
-    if (refresh.disabled_at) return rep.code(403).send({ error: "ACCOUNT_DISABLED" });
-    if (!refresh.two_factor_enabled || !refresh.totp_secret_encrypted) {
-      return rep.code(401).send({ error: "TWO_FACTOR_REQUIRED" });
-    }
-
-    const nextRefreshToken = randomToken();
-    const nextRefreshTokenHash = sha256Hex(nextRefreshToken);
-    const nextRefreshId = ulidLike();
-    const nextRefreshExpiresAt = toSqlTimestamp(Date.now() + PANEL_REFRESH_TOKEN_TTL_MS);
-
-    await q(
-      `INSERT INTO panel_admin_refresh_tokens (id,admin_id,token_hash,expires_at)
-       VALUES (:id,:adminId,:tokenHash,:expiresAt)`,
-      {
-        id: nextRefreshId,
-        adminId: refresh.admin_id,
-        tokenHash: nextRefreshTokenHash,
-        expiresAt: nextRefreshExpiresAt,
-      },
-    );
-
-    await q(
-      `UPDATE panel_admin_refresh_tokens
-       SET revoked_at=NOW()
-       WHERE id=:id`,
-      { id: refresh.id },
-    );
-
-    const accessToken = app.jwt.sign(
-      { sub: refresh.admin_id, typ: "panel_access", scope: "panel_admin" },
-      { expiresIn: PANEL_ACCESS_TOKEN_TTL },
-    );
-
-    const status = await buildPanelStatus(refresh.admin_id);
-    if (!status) return rep.code(401).send({ error: "UNAUTHORIZED" });
-
-    return rep.send({
-      accessToken,
-      refreshToken: nextRefreshToken,
-      admin: status,
-    });
   });
 
   app.post(

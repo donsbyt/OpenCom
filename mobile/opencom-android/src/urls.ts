@@ -139,6 +139,23 @@ function cleanResolvableUrl(url?: string | null): string | null {
   return trimmed;
 }
 
+function isAllowedResolvedUrl(value = ""): boolean {
+  if (
+    value.startsWith("data:") ||
+    value.startsWith("file:") ||
+    value.startsWith("content:") ||
+    value.startsWith("blob:")
+  ) {
+    return true;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export function resolveUrlAgainstBase(
   url: string | null | undefined,
   baseUrl: string | null | undefined,
@@ -158,17 +175,18 @@ export function resolveUrlAgainstBase(
   if (/^https?:\/\//i.test(cleanedUrl)) return cleanedUrl;
 
   const normalizedBaseUrl = normalizeHttpBaseUrl(baseUrl || "");
-  if (!normalizedBaseUrl) return cleanedUrl;
+  if (!normalizedBaseUrl) return null;
 
   try {
-    return new URL(
+    const resolved = new URL(
       cleanedUrl,
       cleanedUrl.startsWith("/")
         ? normalizedBaseUrl
         : `${normalizedBaseUrl.replace(/\/$/, "")}/`,
     ).toString();
+    return isAllowedResolvedUrl(resolved) ? resolved : null;
   } catch {
-    return cleanedUrl;
+    return null;
   }
 }
 

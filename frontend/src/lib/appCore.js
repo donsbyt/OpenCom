@@ -3,6 +3,25 @@ import {
   VOICE_NOISE_SUPPRESSION_DEFAULT_PRESET,
   VOICE_NOISE_SUPPRESSION_PRESETS,
 } from "../voice/sfuClient";
+import {
+  ACCESS_TOKEN_KEY,
+  ACCESS_TOKEN_REFRESH_EVENT,
+  MEMBERSHIP_TOKEN_REFRESH_EVENT,
+  REFRESH_TOKEN_KEY,
+  clearStoredAuthSession,
+  dispatchAccessTokenRefresh,
+  dispatchMembershipTokenRefresh,
+  readStoredAuthSession,
+  runSingleFlightAccessTokenRefresh,
+  writeStoredAuthSession,
+} from "./authSession";
+
+export {
+  ACCESS_TOKEN_KEY,
+  ACCESS_TOKEN_REFRESH_EVENT,
+  MEMBERSHIP_TOKEN_REFRESH_EVENT,
+  REFRESH_TOKEN_KEY,
+} from "./authSession";
 
 export function resolveCoreApiBase() {
   const fromEnv = String(import.meta.env.VITE_CORE_API_URL || "").trim();
@@ -505,8 +524,6 @@ export const CLIENT_EXTENSIONS_DEV_MODE_KEY =
   "opencom_client_extensions_dev_mode";
 export const CLIENT_EXTENSIONS_DEV_URLS_KEY =
   "opencom_client_extensions_dev_urls";
-export const ACCESS_TOKEN_KEY = "opencom_access_token";
-export const REFRESH_TOKEN_KEY = "opencom_refresh_token";
 export const PENDING_INVITE_CODE_KEY = "opencom_pending_invite_code";
 export const PENDING_INVITE_AUTO_JOIN_KEY = "opencom_pending_invite_auto_join";
 export const MESSAGE_PAGE_SIZE = 50;
@@ -647,39 +664,42 @@ export function getMembershipTokenExpiryMs(membershipToken = "") {
 }
 
 export async function refreshAccessTokenWithRefreshToken() {
-  const refreshToken = localStorage.getItem(ACCESS_TOKEN_KEY) || "";
-  if (!refreshToken) return null;
-  const response = await fetch(`${CORE_API}/v1/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refreshToken }),
+  return runSingleFlightAccessTokenRefresh(async () => {
+    const currentSession = readStoredAuthSession();
+    const refreshToken = String(currentSession?.refreshToken || "").trim();
+    if (!refreshToken) return null;
+
+    const response = await fetch(`${CORE_API}/v1/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        clearStoredAuthSession();
+      }
+      return null;
+    }
+
+    const data = await response.json().catch(() => null);
+    const nextSession = writeStoredAuthSession({
+      accessToken: data?.accessToken,
+      refreshToken: data?.refreshToken || refreshToken,
+    });
+    if (!nextSession?.accessToken) {
+      clearStoredAuthSession();
+      return null;
+    }
+
+    dispatchAccessTokenRefresh(nextSession);
+    return nextSession;
   });
-  if (!response.ok) return null;
-  const data = await response.json().catch(() => null);
-  const accessToken = data?.accessToken;
-  if (!accessToken) return null;
-  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  if (data?.refreshToken)
-    localStorage.setItem(REFRESH_TOKEN_KEY, data.refreshToken);
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(
-      new CustomEvent("opencom-access-token-refresh", {
-        detail: {
-          accessToken,
-          refreshToken: data?.refreshToken || refreshToken,
-        },
-      }),
-    );
-  }
-  return {
-    accessToken,
-    refreshToken: data?.refreshToken || refreshToken,
-  };
 }
 
 export async function refreshMembershipTokenForNode(baseUrl, membershipToken) {
   if (!membershipToken) return null;
-  const accessToken = localStorage.getItem(ACCESS_TOKEN_KEY) || "";
+  const accessToken = readStoredAuthSession()?.accessToken || "";
   const serverId = getMembershipTokenServerId(membershipToken);
   if (!serverId) return null;
 
@@ -699,13 +719,7 @@ export async function refreshMembershipTokenForNode(baseUrl, membershipToken) {
     const nextToken = data?.membershipToken;
     if (!nextToken) return null;
 
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(
-        new CustomEvent("opencom-membership-token-refresh", {
-          detail: { serverId, membershipToken: nextToken },
-        }),
-      );
-    }
+    dispatchMembershipTokenRefresh({ serverId, membershipToken: nextToken });
     return nextToken;
   })();
 
