@@ -2,9 +2,13 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { ZodError } from "zod";
+// Utilities
+import { env } from "./env"; 
 
+
+// Routes
 import { HealthRoutes } from "./routes/health";
-import { env } from "./env";
+import { StatsRoutes } from "./routes/stats";
 
 export function buildHttp() {
   const app = Fastify({
@@ -25,8 +29,9 @@ export function buildHttp() {
     request.log.error({ err: error }, "Unhandled request error");
     return reply.code(500).send({ error: "INTERNAL_SERVER_ERROR" });
   });
-
+  // Register Routes
   app.register(HealthRoutes);
+  app.register(StatsRoutes);
 
   return app;
 }
