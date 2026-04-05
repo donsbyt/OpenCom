@@ -5,7 +5,7 @@ on:
   push:
     paths:
       - "client/**"
-      - "frontend/src/App.jsx"
+      - "frontend/**"
       - ".github/workflows/build-client.yml"
 
 jobs:
@@ -16,6 +16,7 @@ jobs:
           - os: windows-latest
             build_script: npm run build:stage:win
             artifact_glob: frontend/OpenCom.exe
+
           - os: ubuntu-latest
             build_script: npm run build:stage:linux
             artifact_glob: |
@@ -28,23 +29,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ✅ Use modern Node (fixes EBADENGINE warnings too)
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
+      # ✅ Install frontend deps FIRST (fixes "vite not found")
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # ✅ Install client deps
       - name: Install client dependencies
         working-directory: client
-        run: npm install
+        run: npm ci
 
+      # ✅ Verify your security override
       - name: Verify minimatch security override
         working-directory: client
         run: npm run check:minimatch
 
+      # ✅ Linux-only deps (prevents future build failures)
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      # ✅ Build everything
       - name: Build and stage desktop client artifacts
         working-directory: client
         run: ${{ matrix.build_script }}
 
+      # ✅ Upload artifacts
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
