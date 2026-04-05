@@ -41,40 +41,6 @@ jobs:
         working-directory: client
         run: npm ci
 
-      # 🔍 DEBUG: Show exactly what npm ci installed for minimatch
-      - name: Debug minimatch installation
-        working-directory: client
-        run: |
-          echo "=== node_modules/minimatch exists? ==="
-          ls node_modules/minimatch/ || echo "❌ MISSING node_modules/minimatch"
-
-          echo "=== node_modules/minimatch/package.json ==="
-          cat node_modules/minimatch/package.json || echo "❌ no package.json"
-
-          echo "=== node_modules/minimatch/dist exists? ==="
-          ls node_modules/minimatch/dist/ || echo "❌ MISSING dist/"
-
-          echo "=== node_modules/minimatch/dist/commonjs exists? ==="
-          ls node_modules/minimatch/dist/commonjs/ || echo "❌ MISSING dist/commonjs/"
-
-          echo "=== node_modules/minimatch/index.js ==="
-          cat node_modules/minimatch/index.js || echo "❌ no index.js"
-
-          echo "=== nested: @electron/asar has its own minimatch? ==="
-          ls node_modules/@electron/asar/node_modules/minimatch/ || echo "not nested (expected)"
-
-          echo "=== vendor/minimatch/dist exists? ==="
-          ls vendor/minimatch/dist/ || echo "❌ MISSING vendor/minimatch/dist"
-
-          echo "=== vendor/minimatch/dist/commonjs exists? ==="
-          ls vendor/minimatch/dist/commonjs/ || echo "❌ MISSING vendor/minimatch/dist/commonjs"
-
-          echo "=== npm ls minimatch ==="
-          npm ls minimatch || true
-
-          echo "=== node -e require minimatch ==="
-          node -e "require('minimatch'); console.log('✅ minimatch loads OK')" || echo "❌ minimatch failed to load"
-
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
