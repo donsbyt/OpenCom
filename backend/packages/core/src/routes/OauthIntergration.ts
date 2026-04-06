@@ -1,10 +1,10 @@
 import { FastifyInstance } from "fastify/types/instance";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { verifyPassword } from "../crypto";
-import { q } from "../db";
-import { env } from "../env";
-import { parseBody } from "../validation";
+import { verifyPassword } from "../crypto.js";
+import { q } from "../db.js";
+import { env } from "../env.js";
+import { parseBody } from "../validation.js";
 
 const oauthAccessSchema = z.object({
   secret: z.string().trim().min(1),

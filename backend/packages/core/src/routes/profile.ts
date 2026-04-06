@@ -346,19 +346,21 @@ export async function profileRoutes(app: FastifyInstance) {
       return rep.code(403).send({ error: "FORBIDDEN" });
     }
 
-    const contentType = mimeFromStoredPath(relPath);
-    rep.header("Content-Type", contentType);
-    rep.header("Cache-Control", "public, max-age=31536000, immutable");
-
     if (isS3StorageEnabled()) {
       const objectStream = await getObjectStreamFromStorage("profiles", relPath);
-      if (objectStream) return rep.send(objectStream);
+      if (objectStream) {
+        rep.header("Content-Type", mimeFromStoredPath(relPath));
+        rep.header("Cache-Control", "public, max-age=31536000, immutable");
+        return rep.send(objectStream);
+      }
     }
 
     if (!fs.existsSync(filepath)) {
       return rep.code(404).send({ error: "NOT_FOUND" });
     }
 
+    rep.header("Content-Type", mimeFromStoredPath(relPath));
+    rep.header("Cache-Control", "public, max-age=31536000, immutable");
     return rep.send(fs.createReadStream(filepath));
   });
 
