@@ -1,10 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import {
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type ReactNode,
+  type TextareaHTMLAttributes,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-type View = "landing" | "login" | "dashboard" | "create-app" | "app-detail";
+type View = "overview" | "create" | "detail";
 
 interface User {
   id: string;
@@ -15,347 +21,288 @@ interface User {
 interface OAuthApp {
   app_id: string;
   app_name: string;
+  description?: string | null;
   client_secret?: string;
+  redirect_uris?: string[] | string;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+interface StoredSession {
+  user: User;
+  secret: string;
+  apps: OAuthApp[];
+}
 
-const API = "https://api.opencom.online";
-const OAUTH_API = "https://oauth.opencom.online";
-
-// ─── Icons ───────────────────────────────────────────────────────────────────
+const CORE_API =
+  process.env.NEXT_PUBLIC_CORE_API_URL?.trim() || "https://api.opencom.online";
+const OAUTH_API =
+  process.env.NEXT_PUBLIC_OAUTH_API_URL?.trim() ||
+  "https://oauth.opencom.online";
+const STORAGE_KEY = "opencom.oauth.portal.session";
 
 const Icon = {
   Logo: () => (
-    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-      <rect width="28" height="28" rx="8" fill="#5865F2" />
+    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+      <rect width="28" height="28" rx="9" fill="url(#logoGradient)" />
       <path
-        d="M8 14a6 6 0 0 1 12 0 6 6 0 0 1-12 0Z"
-        fill="white"
-        fillOpacity=".2"
+        d="M8.5 14a5.5 5.5 0 0 1 11 0 5.5 5.5 0 0 1-11 0Z"
+        fill="rgba(255,255,255,.18)"
       />
-      <circle cx="14" cy="14" r="4" fill="white" />
+      <circle cx="14" cy="14" r="3.8" fill="white" />
+      <defs>
+        <linearGradient id="logoGradient" x1="3" y1="2" x2="24" y2="26" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#F76945" />
+          <stop offset="1" stopColor="#FFB347" />
+        </linearGradient>
+      </defs>
+    </svg>
+  ),
+  Spark: () => (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 1.5 9.7 6.3 14.5 8 9.7 9.7 8 14.5 6.3 9.7 1.5 8l4.8-1.7L8 1.5Z" fill="currentColor" />
     </svg>
   ),
   Apps: () => (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-      <rect x="1" y="1" width="6" height="6" rx="1.5" />
-      <rect x="9" y="1" width="6" height="6" rx="1.5" />
-      <rect x="1" y="9" width="6" height="6" rx="1.5" />
-      <rect x="9" y="9" width="6" height="6" rx="1.5" fillOpacity=".4" />
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <rect x="1.25" y="1.25" width="5.5" height="5.5" rx="1.2" />
+      <rect x="9.25" y="1.25" width="5.5" height="5.5" rx="1.2" />
+      <rect x="1.25" y="9.25" width="5.5" height="5.5" rx="1.2" />
+      <rect x="9.25" y="9.25" width="5.5" height="5.5" rx="1.2" fillOpacity=".35" />
     </svg>
   ),
-  Key: () => (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M10 1a5 5 0 0 1 1 9.9V12l1 1-1 1-1-1-1 1-1-1 1-1v-1.1A5 5 0 0 1 10 1Zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" />
-    </svg>
-  ),
-  Copy: () => (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-      <path d="M5 2a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1H5Zm-3 2a1 1 0 0 1 1-1h.5v1H3v6h5v-.5h1V11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4Z" />
-    </svg>
-  ),
-  Eye: ({ open }: { open: boolean }) =>
-    open ? (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-        <path d="M7 3C4 3 1.5 5.5 1 7c.5 1.5 3 4 6 4s5.5-2.5 6-4c-.5-1.5-3-4-6-4Zm0 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z" />
-      </svg>
-    ) : (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-        <path
-          d="M2 2l10 10M5.5 5.6A2 2 0 0 0 9 9M7 3C4 3 1.5 5.5 1 7c.3.9 1 2 2 3M10 4.5c1.2.8 2.3 1.9 3 2.5-.5 1.5-3 4-6 4-.7 0-1.4-.1-2-.4"
-          strokeWidth="1.2"
-          stroke="currentColor"
-          fill="none"
-        />
-      </svg>
-    ),
-  Trash: () => (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-      <path d="M5.5 1h3l.5 1H10v1H4V2h1l.5-1ZM4 4h6l-.5 7h-5L4 4Zm2 1v5h1V5H6Zm2 0v5h1V5H8Z" />
-    </svg>
-  ),
-  Plus: () => (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-      <path
-        d="M6.5 1v12M1 6.5h12"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        fill="none"
-      />
+  Arrow: () => (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <path d="M3.5 7.5h8m0 0-3-3m3 3-3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
   Back: () => (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-      <path
-        d="M9 2L4 7l5 5"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <path d="M10 3.5 5.5 7.5 10 11.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  Copy: () => (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true">
+      <path d="M5.25 2A2.25 2.25 0 0 0 3 4.25v5.5A2.25 2.25 0 0 0 5.25 12h5.5A2.25 2.25 0 0 0 13 9.75v-5.5A2.25 2.25 0 0 0 10.75 2h-5.5Zm-3 2a2.25 2.25 0 0 1 2.25-2.25H5v1.5h-.5a.75.75 0 0 0-.75.75v6a.75.75 0 0 0 .75.75h6a.75.75 0 0 0 .75-.75v-.5h1.5v.75A2.25 2.25 0 0 1 10.5 13.5h-6A2.25 2.25 0 0 1 2.25 11.25V4Z" />
     </svg>
   ),
   Check: () => (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path
-        d="M2.5 7l3.5 3.5 5.5-6"
-        stroke="#23A55A"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <path d="M3.25 7.75 6.2 10.7 11.8 4.9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  ),
+  Trash: () => (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true">
+      <path d="M5.5 1.75h4l.65 1.1h2.1v1.4h-9v-1.4h2.1l.65-1.1ZM4.4 5.25h6.2l-.55 7.1A1.25 1.25 0 0 1 8.8 13.5H6.2a1.25 1.25 0 0 1-1.25-1.15l-.55-7.1Zm2 .9v5.1h1.2v-5.1H6.4Zm2.2 0v5.1h1.2v-5.1H8.6Z" />
+    </svg>
+  ),
+  Link: () => (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <path d="M5.8 9.2 9.2 5.8M5.4 5.4l-1.6 1.6a2 2 0 1 0 2.8 2.8l1.1-1.1m1.2-2.4 1.1-1.1a2 2 0 0 1 2.8 2.8l-1.6 1.6a2 2 0 0 1-2.8 0" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  Secret: ({ visible }: { visible: boolean }) => (
+    visible ? (
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true">
+        <path d="M7.5 3c-3.1 0-5.7 2.5-6.2 4.5C1.8 9.5 4.4 12 7.5 12s5.7-2.5 6.2-4.5C13.2 5.5 10.6 3 7.5 3Zm0 6.5a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z" />
+      </svg>
+    ) : (
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+        <path d="M2.5 2.5 12.5 12.5M6.4 6.4a1.6 1.6 0 0 0 2.2 2.2M4.1 4.5A7.2 7.2 0 0 0 1.4 7.5C1.9 9.4 4.4 12 7.5 12c1 0 2-.3 2.8-.7m1.7-1.4a8 8 0 0 0 1.6-2.4C13.1 5.6 10.6 3 7.5 3c-.8 0-1.6.2-2.4.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
   ),
 };
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+function safeParseSession(): StoredSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredSession;
+    if (!parsed?.user?.id || !parsed.secret) return null;
+    return {
+      user: parsed.user,
+      secret: parsed.secret,
+      apps: Array.isArray(parsed.apps) ? parsed.apps : [],
+    };
+  } catch {
+    return null;
+  }
+}
 
-function Input({
-  label,
-  ...props
-}: { label: string } & React.InputHTMLAttributes<HTMLInputElement>) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <label
-        style={{
-          fontSize: 12,
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: ".05em",
-          color: "#b5bac1",
-        }}
-      >
-        {label}
-      </label>
-      <input
-        {...props}
-        style={{
-          background: "#1e1f22",
-          border: "1px solid #1e1f22",
-          borderRadius: 4,
-          padding: "10px 12px",
-          color: "#f2f3f5",
-          fontSize: 15,
-          outline: "none",
-          width: "100%",
-          boxSizing: "border-box",
-          transition: "border-color .15s",
-          fontFamily: "inherit",
-        }}
-        onFocus={(e) => (e.target.style.borderColor = "#5865f2")}
-        onBlur={(e) => (e.target.style.borderColor = "#1e1f22")}
-      />
-    </div>
+function persistSession(user: User | null, secret: string, apps: OAuthApp[]) {
+  if (typeof window === "undefined") return;
+  if (!user || !secret) {
+    window.localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({ user, secret, apps }),
   );
+}
+
+function classNames(...values: Array<string | false | null | undefined>) {
+  return values.filter(Boolean).join(" ");
+}
+
+function normalizeRedirectUris(value: OAuthApp["redirect_uris"]): string[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : [];
+    } catch {
+      return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="oauth-field">
+      <span className="oauth-field__label">{label}</span>
+      {hint ? <span className="oauth-field__hint">{hint}</span> : null}
+      {children}
+    </label>
+  );
+}
+
+function TextInput({
+  className,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement> & { className?: string }) {
+  return <input {...props} className={classNames("oauth-input", className)} />;
+}
+
+function TextArea({
+  className,
+  ...props
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & { className?: string }) {
+  return <textarea {...props} className={classNames("oauth-input oauth-input--textarea", className)} />;
 }
 
 function Button({
   children,
   variant = "primary",
   loading,
+  className,
   ...props
-}: {
-  children: React.ReactNode;
-  variant?: "primary" | "secondary" | "danger" | "ghost";
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  children: ReactNode;
+  variant?: "primary" | "secondary" | "ghost" | "danger";
   loading?: boolean;
-} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  const colors = {
-    primary: { bg: "#5865f2", hover: "#4752c4", text: "#fff" },
-    secondary: { bg: "#4e5058", hover: "#6d6f78", text: "#fff" },
-    danger: { bg: "#da373c", hover: "#a12d31", text: "#fff" },
-    ghost: { bg: "transparent", hover: "#2b2d31", text: "#b5bac1" },
-  }[variant];
-  const [hovered, setHovered] = useState(false);
+  className?: string;
+}) {
   return (
     <button
       {...props}
       disabled={loading || props.disabled}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        background: hovered ? colors.hover : colors.bg,
-        color: colors.text,
-        border: "none",
-        borderRadius: 4,
-        padding: "10px 20px",
-        fontSize: 14,
-        fontWeight: 600,
-        cursor: loading || props.disabled ? "not-allowed" : "pointer",
-        opacity: loading || props.disabled ? 0.6 : 1,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        transition: "background .15s",
-        fontFamily: "inherit",
-        whiteSpace: "nowrap",
-      }}
+      className={classNames("oauth-button", `oauth-button--${variant}`, className)}
     >
-      {loading ? <Spinner /> : children}
+      {loading ? <span className="oauth-spinner" aria-hidden="true" /> : null}
+      {children}
     </button>
   );
 }
 
-function Spinner() {
-  return (
-    <div
-      style={{
-        width: 14,
-        height: 14,
-        border: "2px solid rgba(255,255,255,.3)",
-        borderTopColor: "#fff",
-        borderRadius: "50%",
-        animation: "spin .7s linear infinite",
-      }}
-    />
-  );
+function Pill({ children, tone = "default" }: { children: ReactNode; tone?: "default" | "warm" | "success" }) {
+  return <span className={classNames("oauth-pill", `oauth-pill--${tone}`)}>{children}</span>;
 }
 
-function Tag({
-  color,
-  children,
+function StatCard({
+  label,
+  value,
+  meta,
 }: {
-  color: string;
-  children: React.ReactNode;
+  label: string;
+  value: string;
+  meta: string;
 }) {
   return (
-    <span
-      style={{
-        background: color + "22",
-        color,
-        border: `1px solid ${color}44`,
-        borderRadius: 4,
-        padding: "2px 8px",
-        fontSize: 11,
-        fontWeight: 700,
-        textTransform: "uppercase",
-        letterSpacing: ".06em",
-      }}
-    >
-      {children}
-    </span>
+    <article className="oauth-stat-card">
+      <span className="oauth-stat-card__label">{label}</span>
+      <strong className="oauth-stat-card__value">{value}</strong>
+      <p className="oauth-stat-card__meta">{meta}</p>
+    </article>
   );
 }
 
 function CopyField({
-  value,
   label,
+  value,
   secret,
 }: {
-  value: string;
   label: string;
+  value: string;
   secret?: boolean;
 }) {
-  const [show, setShow] = useState(!secret);
+  const [visible, setVisible] = useState(!secret);
   const [copied, setCopied] = useState(false);
-  const copy = () => {
-    navigator.clipboard.writeText(value);
+
+  async function copy() {
+    await navigator.clipboard.writeText(value);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+    window.setTimeout(() => setCopied(false), 1800);
+  }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <label
-        style={{
-          fontSize: 12,
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: ".05em",
-          color: "#b5bac1",
-        }}
-      >
-        {label}
-      </label>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          background: "#1e1f22",
-          borderRadius: 4,
-          padding: "10px 12px",
-        }}
-      >
-        <span
-          style={{
-            flex: 1,
-            fontSize: 13,
-            color: "#f2f3f5",
-            fontFamily: "monospace",
-            wordBreak: "break-all",
-          }}
-        >
-          {show ? value : "•".repeat(Math.min(value.length, 40))}
-        </span>
-        <div style={{ display: "flex", gap: 6 }}>
-          {secret && (
+    <div className="oauth-copy-field">
+      <div className="oauth-copy-field__header">
+        <span className="oauth-copy-field__label">{label}</span>
+        <div className="oauth-copy-field__actions">
+          {secret ? (
             <button
-              onClick={() => setShow((s) => !s)}
-              style={{
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                color: "#b5bac1",
-                padding: 2,
-              }}
+              type="button"
+              className="oauth-icon-button"
+              onClick={() => setVisible((current) => !current)}
+              aria-label={visible ? "Hide value" : "Show value"}
             >
-              <Icon.Eye open={show} />
+              <Icon.Secret visible={visible} />
             </button>
-          )}
-          <button
-            onClick={copy}
-            style={{
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              color: copied ? "#23a55a" : "#b5bac1",
-              padding: 2,
-              display: "flex",
-              alignItems: "center",
-              gap: 4,
-              fontSize: 12,
-            }}
-          >
-            {copied ? (
-              <>
-                <Icon.Check /> Copied
-              </>
-            ) : (
-              <Icon.Copy />
-            )}
+          ) : null}
+          <button type="button" className="oauth-icon-button" onClick={copy}>
+            {copied ? <Icon.Check /> : <Icon.Copy />}
+            <span>{copied ? "Copied" : "Copy"}</span>
           </button>
         </div>
+      </div>
+      <div className="oauth-copy-field__body">
+        {visible ? value : "\u2022".repeat(Math.min(value.length, 42))}
       </div>
     </div>
   );
 }
 
-function Toast({ msg, type }: { msg: string; type: "success" | "error" }) {
+function Toast({
+  message,
+  tone,
+  onClose,
+}: {
+  message: string;
+  tone: "success" | "error";
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const timeout = window.setTimeout(onClose, 2800);
+    return () => window.clearTimeout(timeout);
+  }, [onClose]);
+
   return (
-    <div
-      style={{
-        position: "fixed",
-        bottom: 24,
-        right: 24,
-        zIndex: 999,
-        background: type === "success" ? "#23a55a" : "#da373c",
-        color: "#fff",
-        borderRadius: 8,
-        padding: "12px 20px",
-        fontSize: 14,
-        fontWeight: 600,
-        boxShadow: "0 4px 24px rgba(0,0,0,.4)",
-        animation: "slideUp .25s ease",
-      }}
-    >
-      {msg}
+    <div className={classNames("oauth-toast", `oauth-toast--${tone}`)}>
+      {tone === "success" ? <Icon.Check /> : <Icon.Trash />}
+      <span>{message}</span>
     </div>
   );
 }
-
-// ─── Views ────────────────────────────────────────────────────────────────────
 
 function LoginView({
   onLogin,
@@ -367,256 +314,289 @@ function LoginView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const submit = async () => {
+  async function submit() {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${OAUTH_API}/v1/oauth/login`, {
+      const response = await fetch(`${CORE_API}/v1/oauth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.secret)
-        throw new Error(data.error || "Login failed");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.secret) {
+        throw new Error(String(data.error || "Unable to sign in."));
+      }
       onLogin(data.user, data.secret);
-    } catch (e: any) {
-      setError(e.message);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to sign in.";
+      setError(message);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#313338",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
-      }}
-    >
-      <div style={{ width: "100%", maxWidth: 420 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginBottom: 32,
-          }}
-        >
-          <Icon.Logo />
-          <span
-            style={{
-              fontSize: 20,
-              fontWeight: 700,
-              color: "#f2f3f5",
-              letterSpacing: "-.02em",
-            }}
-          >
-            OpenCom
-          </span>
-          <Tag color="#5865f2">Developer</Tag>
-        </div>
-        <div style={{ background: "#2b2d31", borderRadius: 8, padding: 32 }}>
-          <h1
-            style={{
-              margin: "0 0 8px",
-              fontSize: 24,
-              fontWeight: 700,
-              color: "#f2f3f5",
-            }}
-          >
-            Welcome back
-          </h1>
-          <p style={{ margin: "0 0 28px", fontSize: 14, color: "#949ba4" }}>
-            Sign in to manage your applications.
+    <main className="oauth-shell">
+      <section className="oauth-hero">
+        <div className="oauth-hero__intro">
+          <Pill tone="warm">OAuth Developer Portal</Pill>
+          <h1>Build apps that feel first-party from day one.</h1>
+          <p>
+            Register OAuth clients, manage callback URLs, and generate sign-in
+            handoff links from one focused dashboard.
           </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <Input
-              label="Email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-            />
-            <Input
-              label="Password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              onKeyDown={(e) => e.key === "Enter" && submit()}
-            />
-            {error && (
-              <p
-                style={{
-                  margin: 0,
-                  fontSize: 13,
-                  color: "#f23f42",
-                  fontWeight: 500,
-                }}
-              >
-                {error}
-              </p>
-            )}
-            <Button
-              loading={loading}
-              onClick={submit}
-              style={{ width: "100%", justifyContent: "center", marginTop: 4 }}
-            >
-              Log In
-            </Button>
+          <div className="oauth-hero__highlights">
+            <div>
+              <strong>Faster setup</strong>
+              <span>Start with a cleaner app creation flow and sane defaults.</span>
+            </div>
+            <div>
+              <strong>Safer handoff</strong>
+              <span>Copy secrets once, keep redirect URLs visible, and review link state clearly.</span>
+            </div>
+            <div>
+              <strong>Less guesswork</strong>
+              <span>See exactly what to call next after creating an OAuth app.</span>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+
+        <div className="oauth-auth-card">
+          <div className="oauth-brand">
+            <Icon.Logo />
+            <div>
+              <strong>OpenCom</strong>
+              <span>Developer dashboard</span>
+            </div>
+          </div>
+
+          <div className="oauth-auth-copy">
+            <h2>Sign in</h2>
+            <p>Use your OpenCom account to create or manage OAuth clients.</p>
+          </div>
+
+          <div className="oauth-form-grid">
+            <Field label="Email">
+              <TextInput
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+              />
+            </Field>
+            <Field label="Password">
+              <TextInput
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="••••••••"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void submit();
+                }}
+              />
+            </Field>
+          </div>
+
+          {error ? <p className="oauth-error">{error}</p> : null}
+
+          <Button className="oauth-button--full" onClick={() => void submit()} loading={loading}>
+            Continue to dashboard
+            <Icon.Arrow />
+          </Button>
+        </div>
+      </section>
+    </main>
   );
 }
 
 function CreateAppView({
+  user,
   secret,
   onCreated,
-  onBack,
+  onCancel,
 }: {
+  user: User;
   secret: string;
   onCreated: (app: OAuthApp) => void;
-  onBack: () => void;
+  onCancel: () => void;
 }) {
   const [appId, setAppId] = useState("");
   const [appName, setAppName] = useState("");
-  const [redirectUrl, setRedirectUrl] = useState("");
-  const [userId, setUserId] = useState("");
+  const [description, setDescription] = useState("");
+  const [redirectUris, setRedirectUris] = useState<string[]>([
+    "http://localhost:3000/callback",
+  ]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const submit = async () => {
+  function updateRedirect(index: number, value: string) {
+    setRedirectUris((current) =>
+      current.map((entry, entryIndex) => (entryIndex === index ? value : entry)),
+    );
+  }
+
+  function addRedirect() {
+    setRedirectUris((current) => [...current, ""]);
+  }
+
+  function removeRedirect(index: number) {
+    setRedirectUris((current) =>
+      current.length === 1 ? current : current.filter((_, entryIndex) => entryIndex !== index),
+    );
+  }
+
+  async function submit() {
     setLoading(true);
     setError("");
+    const cleanedRedirects = redirectUris.map((value) => value.trim()).filter(Boolean);
+
+    if (!cleanedRedirects.length) {
+      setError("Add at least one redirect URI before creating the app.");
+      setLoading(false);
+      return;
+    }
+
     try {
-      const res = await fetch(`${API}/v1/manager/create-app`, {
+      const response = await fetch(`${OAUTH_API}/v1/apps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          app_id: appId,
-          app_name: appName,
+          app_id: appId.trim(),
+          app_name: appName.trim(),
+          description: description.trim(),
           secret_code: secret,
-          user_id: userId,
-          redirect_url: redirectUrl,
+          user_id: user.id,
+          redirect_url: cleanedRedirects.join(","),
         }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.app_id)
-        throw new Error(data.error || "Failed to create app");
-      onCreated(data);
-    } catch (e: any) {
-      setError(e.message);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.app_id) {
+        throw new Error(String(data.error || "Failed to create application."));
+      }
+      onCreated({
+        ...data,
+        description: description.trim(),
+        redirect_uris: cleanedRedirects,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to create application.";
+      setError(message);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 24,
-        maxWidth: 600,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button
-          onClick={onBack}
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            color: "#b5bac1",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            fontSize: 13,
-            fontFamily: "inherit",
-          }}
-        >
-          <Icon.Back /> Back
+    <section className="oauth-panel oauth-panel--wide">
+      <div className="oauth-panel__heading">
+        <button type="button" className="oauth-back-button" onClick={onCancel}>
+          <Icon.Back />
+          Back to apps
         </button>
-      </div>
-      <div>
-        <h2
-          style={{
-            margin: "0 0 4px",
-            fontSize: 20,
-            fontWeight: 700,
-            color: "#f2f3f5",
-          }}
-        >
-          New Application
-        </h2>
-        <p style={{ margin: 0, fontSize: 14, color: "#949ba4" }}>
-          Register a new OAuth app to get your client credentials.
+        <Pill tone="warm">New client</Pill>
+        <h2>Create a new OAuth application</h2>
+        <p>
+          Set up the basic identity for your app now. You can refine callback
+          URLs and credentials after creation.
         </p>
       </div>
-      <div
-        style={{
-          background: "#2b2d31",
-          borderRadius: 8,
-          padding: 28,
-          display: "flex",
-          flexDirection: "column",
-          gap: 18,
-        }}
-      >
-        <Input
-          label="App ID (must be an email-like ID)"
-          type="text"
-          value={appId}
-          onChange={(e) => setAppId(e.target.value)}
-          placeholder="myapp@opencom.online"
-        />
-        <Input
-          label="App Name"
-          type="text"
-          value={appName}
-          onChange={(e) => setAppName(e.target.value)}
-          placeholder="My Awesome App"
-        />
-        <Input
-          label="User ID"
-          type="text"
-          value={userId}
-          onChange={(e) => setUserId(e.target.value)}
-          placeholder="your-user-id"
-        />
-        <Input
-          label="Redirect URLs (comma-separated)"
-          type="text"
-          value={redirectUrl}
-          onChange={(e) => setRedirectUrl(e.target.value)}
-          placeholder="https://myapp.com/callback,https://localhost:3000/callback"
-        />
-        {error && (
-          <p
-            style={{
-              margin: 0,
-              fontSize: 13,
-              color: "#f23f42",
-              fontWeight: 500,
-            }}
-          >
-            {error}
-          </p>
-        )}
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <Button loading={loading} onClick={submit}>
-            Create Application
-          </Button>
+
+      <div className="oauth-create-layout">
+        <div className="oauth-card">
+          <div className="oauth-card__header">
+            <h3>App details</h3>
+            <p>Use a stable app ID and a name developers will recognize.</p>
+          </div>
+
+          <div className="oauth-form-grid">
+            <Field label="App ID" hint="The API currently expects an email-like identifier.">
+              <TextInput
+                value={appId}
+                onChange={(event) => setAppId(event.target.value)}
+                placeholder="my-app@opencom.online"
+              />
+            </Field>
+            <Field label="Display name">
+              <TextInput
+                value={appName}
+                onChange={(event) => setAppName(event.target.value)}
+                placeholder="My OpenCom Integration"
+              />
+            </Field>
+            <Field label="Description" hint="Optional, but useful once you have multiple apps.">
+              <TextArea
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder="Describe what this app does and who it is for."
+                rows={4}
+              />
+            </Field>
+          </div>
         </div>
+
+        <div className="oauth-card">
+          <div className="oauth-card__header">
+            <h3>Redirect URIs</h3>
+            <p>
+              Add every callback URL you intend to use in local dev and production.
+            </p>
+          </div>
+
+          <div className="oauth-redirect-list">
+            {redirectUris.map((uri, index) => (
+              <div key={`${index}-${uri}`} className="oauth-redirect-row">
+                <TextInput
+                  value={uri}
+                  onChange={(event) => updateRedirect(index, event.target.value)}
+                  placeholder={index === 0 ? "https://example.com/oauth/callback" : "Add another redirect URI"}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="oauth-button--compact"
+                  onClick={() => removeRedirect(index)}
+                  disabled={redirectUris.length === 1}
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+
+          <div className="oauth-card__footer">
+            <Button type="button" variant="secondary" onClick={addRedirect}>
+              Add redirect URI
+            </Button>
+          </div>
+        </div>
+
+        <aside className="oauth-card oauth-card--accent">
+          <div className="oauth-card__header">
+            <h3>Creation checklist</h3>
+          </div>
+          <ul className="oauth-checklist">
+            <li>Your app ID should stay stable once clients start using it.</li>
+            <li>Include localhost callbacks now if you plan to test locally.</li>
+            <li>The client secret will be shown once, so copy it somewhere safe.</li>
+            <li>Your account ID is filled automatically from the current session.</li>
+          </ul>
+        </aside>
       </div>
-    </div>
+
+      {error ? <p className="oauth-error">{error}</p> : null}
+
+      <div className="oauth-action-row">
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="button" onClick={() => void submit()} loading={loading}>
+          Create application
+          <Icon.Arrow />
+        </Button>
+      </div>
+    </section>
   );
 }
 
@@ -629,669 +609,496 @@ function AppDetail({
   app: OAuthApp;
   secret: string;
   onBack: () => void;
-  onDeleted: () => void;
+  onDeleted: (appId: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
-  const [toast, setToast] = useState<{
-    msg: string;
-    type: "success" | "error";
-  } | null>(null);
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [generatedLink, setGeneratedLink] = useState("");
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const showToast = (msg: string, type: "success" | "error") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
-  };
+  const redirectUris = useMemo(
+    () => normalizeRedirectUris(app.redirect_uris),
+    [app.redirect_uris],
+  );
 
-  const deleteApp = async () => {
+  async function deleteApp() {
     setLoading(true);
     try {
-      const res = await fetch(`${API}/v1/oauth-app`, {
+      const response = await fetch(`${OAUTH_API}/v1/apps/${encodeURIComponent(app.app_id)}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ app_id: app.app_id, secret_code: secret }),
+        body: JSON.stringify({ secret_code: secret }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Delete failed");
-      showToast("Application deleted.", "success");
-      setTimeout(onDeleted, 1200);
-    } catch (e: any) {
-      showToast(e.message, "error");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(data.error || "Unable to delete application."));
+      }
+      setToast({ message: "Application deleted.", tone: "success" });
+      window.setTimeout(() => onDeleted(app.app_id), 700);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unable to delete application.";
+      setToast({ message, tone: "error" });
     } finally {
       setLoading(false);
       setConfirmDelete(false);
     }
-  };
+  }
+
+  async function generateLink() {
+    setLinkLoading(true);
+    try {
+      const response = await fetch(`${OAUTH_API}/v1/oauth/links`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret, app_id: app.app_id }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.oauth_link) {
+        throw new Error(String(data.message || data.error || "Unable to generate OAuth link."));
+      }
+      setGeneratedLink(String(data.oauth_link));
+      setToast({ message: "Fresh OAuth login link generated.", tone: "success" });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unable to generate OAuth link.";
+      setToast({ message, tone: "error" });
+    } finally {
+      setLinkLoading(false);
+    }
+  }
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 24,
-        maxWidth: 680,
-      }}
-    >
-      {toast && <Toast {...toast} />}
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button
-          onClick={onBack}
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            color: "#b5bac1",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            fontSize: 13,
-            fontFamily: "inherit",
-          }}
-        >
-          <Icon.Back /> Back to Apps
+    <section className="oauth-panel oauth-panel--wide">
+      {toast ? (
+        <Toast
+          message={toast.message}
+          tone={toast.tone}
+          onClose={() => setToast(null)}
+        />
+      ) : null}
+
+      <div className="oauth-panel__heading">
+        <button type="button" className="oauth-back-button" onClick={onBack}>
+          <Icon.Back />
+          Back to apps
         </button>
+        <Pill>OAuth application</Pill>
+        <h2>{app.app_name}</h2>
+        <p>{app.description || "Credentials, redirect URLs, and OAuth handoff tools for this application."}</p>
       </div>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: 12,
-        }}
-      >
-        <div>
-          <h2
-            style={{
-              margin: "0 0 4px",
-              fontSize: 22,
-              fontWeight: 700,
-              color: "#f2f3f5",
-            }}
-          >
-            {app.app_name}
-          </h2>
-          <span
-            style={{ fontSize: 13, color: "#949ba4", fontFamily: "monospace" }}
-          >
-            {app.app_id}
-          </span>
+
+      <div className="oauth-detail-grid">
+        <div className="oauth-card">
+          <div className="oauth-card__header">
+            <h3>Credentials</h3>
+            <p>Keep the client secret safe. It may not be shown again after this session.</p>
+          </div>
+          <CopyField label="Client ID" value={app.app_id} />
+          {app.client_secret ? (
+            <CopyField label="Client secret" value={app.client_secret} secret />
+          ) : (
+            <p className="oauth-note">
+              This app was restored from your local session, so only the app ID is available here.
+            </p>
+          )}
         </div>
-        <Tag color="#5865f2">OAuth App</Tag>
-      </div>
 
-      <div
-        style={{
-          background: "#2b2d31",
-          borderRadius: 8,
-          padding: 28,
-          display: "flex",
-          flexDirection: "column",
-          gap: 20,
-        }}
-      >
-        <h3
-          style={{
-            margin: 0,
-            fontSize: 13,
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: ".05em",
-            color: "#949ba4",
-          }}
-        >
-          Credentials
-        </h3>
-        <CopyField label="Client ID (App ID)" value={app.app_id} />
-        {app.client_secret && (
-          <>
-            <div style={{ borderTop: "1px solid #1e1f22", paddingTop: 20 }}>
-              <div
-                style={{
-                  background: "#faa61a22",
-                  border: "1px solid #faa61a44",
-                  borderRadius: 6,
-                  padding: "10px 14px",
-                  marginBottom: 16,
-                  fontSize: 13,
-                  color: "#faa61a",
-                }}
-              >
-                ⚠️ Copy your client secret now — it won't be shown again.
-              </div>
-              <CopyField
-                label="Client Secret"
-                value={app.client_secret}
-                secret
-              />
-            </div>
-          </>
-        )}
-      </div>
+        <div className="oauth-card">
+          <div className="oauth-card__header">
+            <h3>Redirect URIs</h3>
+            <p>These are the callback URLs currently attached to this app in the dashboard state.</p>
+          </div>
+          {redirectUris.length ? (
+            <ul className="oauth-uri-list">
+              {redirectUris.map((uri) => (
+                <li key={uri}>
+                  <code>{uri}</code>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="oauth-note">No redirect URIs are stored for this app yet.</p>
+          )}
+        </div>
 
-      <div style={{ background: "#2b2d31", borderRadius: 8, padding: 28 }}>
-        <h3
-          style={{
-            margin: "0 0 16px",
-            fontSize: 13,
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: ".05em",
-            color: "#949ba4",
-          }}
-        >
-          Danger Zone
-        </h3>
-        {!confirmDelete ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 12,
-              flexWrap: "wrap",
-            }}
-          >
-            <div>
-              <p
-                style={{
-                  margin: "0 0 2px",
-                  fontSize: 14,
-                  fontWeight: 600,
-                  color: "#f2f3f5",
-                }}
-              >
-                Delete this application
-              </p>
-              <p style={{ margin: 0, fontSize: 13, color: "#949ba4" }}>
-                This action is permanent and cannot be undone.
-              </p>
-            </div>
-            <Button variant="danger" onClick={() => setConfirmDelete(true)}>
-              <Icon.Trash /> Delete App
+        <div className="oauth-card oauth-card--span-2">
+          <div className="oauth-card__header">
+            <h3>OAuth sign-in handoff</h3>
+            <p>Generate a temporary link tied to your current OAuth session to test user authorization.</p>
+          </div>
+
+          <div className="oauth-inline-actions">
+            <Button type="button" variant="secondary" onClick={() => void generateLink()} loading={linkLoading}>
+              <Icon.Link />
+              Generate test login link
             </Button>
           </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <p
-              style={{
-                margin: 0,
-                fontSize: 14,
-                color: "#f23f42",
-                fontWeight: 600,
-              }}
-            >
-              Are you sure? This cannot be undone.
+
+          {generatedLink ? (
+            <CopyField label="Generated login link" value={generatedLink} />
+          ) : (
+            <p className="oauth-note">
+              Generate a link when you want to test the login handoff route for this app.
             </p>
-            <div style={{ display: "flex", gap: 10 }}>
-              <Button variant="danger" loading={loading} onClick={deleteApp}>
-                Yes, Delete It
-              </Button>
-              <Button variant="ghost" onClick={() => setConfirmDelete(false)}>
-                Cancel
+          )}
+
+          <div className="oauth-code-block">
+            <span className="oauth-code-block__label">Next call</span>
+            <code>{`POST ${OAUTH_API}/v1/oauth/links`}</code>
+            <pre>{JSON.stringify({ secret: "YOUR_SESSION_SECRET", app_id: app.app_id }, null, 2)}</pre>
+          </div>
+        </div>
+
+        <div className="oauth-card oauth-card--danger oauth-card--span-2">
+          <div className="oauth-card__header">
+            <h3>Danger zone</h3>
+            <p>Deleting an app removes its dashboard entry and OAuth client record.</p>
+          </div>
+
+          {!confirmDelete ? (
+            <div className="oauth-danger-row">
+              <div>
+                <strong>Delete this application</strong>
+                <p>This action cannot be undone.</p>
+              </div>
+              <Button type="button" variant="danger" onClick={() => setConfirmDelete(true)}>
+                <Icon.Trash />
+                Delete app
               </Button>
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="oauth-confirm-box">
+              <p>Delete <strong>{app.app_name}</strong> permanently?</p>
+              <div className="oauth-inline-actions">
+                <Button type="button" variant="danger" onClick={() => void deleteApp()} loading={loading}>
+                  Confirm delete
+                </Button>
+                <Button type="button" variant="ghost" onClick={() => setConfirmDelete(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
 function Dashboard({
   user,
   secret,
+  apps,
+  onAppsChange,
   onLogout,
 }: {
   user: User;
   secret: string;
+  apps: OAuthApp[];
+  onAppsChange: (apps: OAuthApp[]) => void;
   onLogout: () => void;
 }) {
-  const [view, setView] = useState<"list" | "create" | "detail">("list");
-  const [apps, setApps] = useState<OAuthApp[]>([]);
-  const [selectedApp, setSelectedApp] = useState<OAuthApp | null>(null);
-  const [toast, setToast] = useState<{
-    msg: string;
-    type: "success" | "error";
-  } | null>(null);
+  const [view, setView] = useState<View>("overview");
+  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
+  const [sortBy, setSortBy] = useState<"name" | "created">("created");
+  const [density, setDensity] = useState<"compact" | "comfortable">("compact");
 
-  const showToast = (msg: string, type: "success" | "error") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
-  };
+  const selectedApp = apps.find((entry) => entry.app_id === selectedAppId) ?? null;
+  const sortedApps = useMemo(() => {
+    const next = [...apps];
+    if (sortBy === "name") {
+      next.sort((a, b) => a.app_name.localeCompare(b.app_name));
+      return next;
+    }
+    return next.reverse();
+  }, [apps, sortBy]);
 
-  const handleCreated = (app: OAuthApp) => {
-    setApps((prev) => [...prev, app]);
-    setSelectedApp(app);
+  function openDetail(app: OAuthApp) {
+    setSelectedAppId(app.app_id);
     setView("detail");
-    showToast("Application created!", "success");
-  };
+  }
 
-  const sidebarItems = [
-    { label: "Applications", icon: <Icon.Apps />, id: "list" as const },
-  ];
+  function handleCreated(app: OAuthApp) {
+    const nextApps = [app, ...apps.filter((entry) => entry.app_id !== app.app_id)];
+    onAppsChange(nextApps);
+    setSelectedAppId(app.app_id);
+    setView("detail");
+    setToast({ message: "Application created successfully.", tone: "success" });
+  }
+
+  function handleDeleted(appId: string) {
+    const nextApps = apps.filter((entry) => entry.app_id !== appId);
+    onAppsChange(nextApps);
+    setSelectedAppId(null);
+    setView("overview");
+  }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#313338",
-        display: "flex",
-        fontFamily: "inherit",
-      }}
-    >
-      {toast && <Toast {...toast} />}
+    <main className="oauth-dashboard">
+      {toast ? (
+        <Toast
+          message={toast.message}
+          tone={toast.tone}
+          onClose={() => setToast(null)}
+        />
+      ) : null}
 
-      {/* Sidebar */}
-      <div
-        style={{
-          width: 240,
-          background: "#2b2d31",
-          display: "flex",
-          flexDirection: "column",
-          flexShrink: 0,
-        }}
-      >
-        {/* Logo */}
-        <div
-          style={{
-            padding: "20px 16px 16px",
-            borderBottom: "1px solid #1e1f22",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Icon.Logo />
-            <div>
-              <div
-                style={{
-                  fontSize: 14,
-                  fontWeight: 700,
-                  color: "#f2f3f5",
-                  lineHeight: 1.2,
-                }}
-              >
-                OpenCom
-              </div>
-              <div style={{ fontSize: 11, color: "#949ba4" }}>
-                Developer Portal
-              </div>
-            </div>
+      <aside className="oauth-sidebar">
+        <div className="oauth-sidebar__brand">
+          <Icon.Logo />
+          <div>
+            <strong>OpenCom</strong>
+            <span>Developer portal</span>
           </div>
         </div>
 
-        {/* Nav */}
-        <nav style={{ padding: "8px 8px", flex: 1 }}>
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: ".06em",
-              color: "#949ba4",
-              padding: "8px 8px 4px",
-            }}
-          >
-            Developer
-          </div>
-          {sidebarItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => {
-                setView("list");
-              }}
-              style={{
-                width: "100%",
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "8px 10px",
-                borderRadius: 4,
-                border: "none",
-                cursor: "pointer",
-                background:
-                  view !== "create" && view !== "detail"
-                    ? "#404249"
-                    : "transparent",
-                color:
-                  view !== "create" && view !== "detail"
-                    ? "#f2f3f5"
-                    : "#949ba4",
-                fontSize: 14,
-                fontWeight: 500,
-                fontFamily: "inherit",
-                textAlign: "left",
-                transition: "background .1s",
-              }}
-            >
-              {item.icon} {item.label}
-            </button>
-          ))}
-        </nav>
-
-        {/* User */}
-        <div
-          style={{
-            padding: "12px 12px",
-            borderTop: "1px solid #1e1f22",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-          }}
-        >
-          <div
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: "50%",
-              background: "#5865f2",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 13,
-              fontWeight: 700,
-              color: "#fff",
-              flexShrink: 0,
-            }}
-          >
-            {user.username[0]?.toUpperCase()}
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 600,
-                color: "#f2f3f5",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {user.username}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: "#949ba4",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {user.email}
-            </div>
-          </div>
+        <div className="oauth-sidebar__nav">
+          <div className="oauth-sidebar__section-title">Manage</div>
           <button
-            onClick={onLogout}
-            title="Sign out"
-            style={{
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              color: "#949ba4",
-              fontSize: 11,
-              fontFamily: "inherit",
-            }}
+            type="button"
+            className={classNames("oauth-nav-button", view !== "create" && view !== "detail" && "is-active")}
+            onClick={() => setView("overview")}
           >
-            Out
+            <Icon.Apps />
+            Applications
+          </button>
+          <button
+            type="button"
+            className={classNames("oauth-nav-button", view === "create" && "is-active")}
+            onClick={() => setView("create")}
+          >
+            <Icon.Spark />
+            New application
+          </button>
+          <div className="oauth-sidebar__section-title">Explore</div>
+          <button type="button" className="oauth-nav-button oauth-nav-button--muted" disabled>
+            Teams
+          </button>
+          <button type="button" className="oauth-nav-button oauth-nav-button--muted" disabled>
+            Documentation
           </button>
         </div>
-      </div>
 
-      {/* Main */}
-      <div style={{ flex: 1, padding: "40px 48px", overflowY: "auto" }}>
-        {view === "create" && (
+        <div className="oauth-session-card">
+          <span className="oauth-session-card__label">Current OAuth session</span>
+          <CopyField label="Session secret" value={secret} secret />
+          <p>
+            This secret is used by the app manager and link generation routes
+            during your current dashboard session.
+          </p>
+        </div>
+
+        <div className="oauth-sidebar-promo">
+          <span className="oauth-sidebar-promo__eyebrow">Developer notes</span>
+          <strong>Build faster with cleaner app setup.</strong>
+          <p>
+            Use one application per surface while you are iterating, then split
+            production clients once the auth flow is stable.
+          </p>
+        </div>
+
+        <div className="oauth-sidebar__user">
+          <div className="oauth-avatar">{user.username.slice(0, 1).toUpperCase()}</div>
+          <div>
+            <strong>{user.username}</strong>
+            <span>{user.email}</span>
+          </div>
+          <Button type="button" variant="ghost" className="oauth-button--compact" onClick={onLogout}>
+            Sign out
+          </Button>
+        </div>
+      </aside>
+
+      <section className="oauth-main">
+        {view === "create" ? (
           <CreateAppView
+            user={user}
             secret={secret}
             onCreated={handleCreated}
-            onBack={() => setView("list")}
+            onCancel={() => setView("overview")}
           />
-        )}
+        ) : null}
 
-        {view === "detail" && selectedApp && (
+        {view === "detail" && selectedApp ? (
           <AppDetail
             app={selectedApp}
             secret={secret}
-            onBack={() => setView("list")}
-            onDeleted={() => {
-              setApps((prev) =>
-                prev.filter((a) => a.app_id !== selectedApp.app_id),
-              );
-              setView("list");
-            }}
+            onBack={() => setView("overview")}
+            onDeleted={handleDeleted}
           />
-        )}
+        ) : null}
 
-        {view === "list" && (
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 28,
-              maxWidth: 720,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "flex-start",
-                justifyContent: "space-between",
-                gap: 16,
-                flexWrap: "wrap",
-              }}
-            >
-              <div>
-                <h1
-                  style={{
-                    margin: "0 0 4px",
-                    fontSize: 24,
-                    fontWeight: 700,
-                    color: "#f2f3f5",
-                  }}
-                >
-                  Applications
-                </h1>
-                <p style={{ margin: 0, fontSize: 14, color: "#949ba4" }}>
-                  {apps.length === 0
-                    ? "You haven't created any applications yet."
-                    : `You have ${apps.length} application${apps.length !== 1 ? "s" : ""}.`}
-                </p>
-              </div>
-              <Button onClick={() => setView("create")}>
-                <Icon.Plus /> New Application
-              </Button>
-            </div>
-
-            {/* Session token info */}
-            <div
-              style={{
-                background: "#2b2d31",
-                borderRadius: 8,
-                padding: 20,
-                display: "flex",
-                flexDirection: "column",
-                gap: 12,
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <Icon.Key />
-                <span
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    letterSpacing: ".05em",
-                    color: "#949ba4",
-                  }}
-                >
-                  Session Token
-                </span>
-              </div>
-              <CopyField label="OAuth Secret" value={secret} secret />
-              <p style={{ margin: 0, fontSize: 12, color: "#949ba4" }}>
-                This is your session secret — use it to authorize API calls to{" "}
-                <code
-                  style={{
-                    background: "#1e1f22",
-                    borderRadius: 3,
-                    padding: "1px 5px",
-                    fontSize: 11,
-                  }}
-                >
-                  api.opencom.online
-                </code>{" "}
-                and{" "}
-                <code
-                  style={{
-                    background: "#1e1f22",
-                    borderRadius: 3,
-                    padding: "1px 5px",
-                    fontSize: 11,
-                  }}
-                >
-                  oauth.opencom.online
-                </code>
-                .
+        {view === "overview" ? (
+          <section className="oauth-panel">
+            <div className="oauth-panel__heading">
+              <h1>Applications</h1>
+              <p>
+                Create and manage OpenCom OAuth applications for local development,
+                staging, and production handoff flows.
               </p>
             </div>
 
-            {/* Apps list */}
-            {apps.length > 0 && (
-              <div
-                style={{ display: "flex", flexDirection: "column", gap: 10 }}
-              >
-                {apps.map((app) => (
+            <div className="oauth-top-actions">
+              <Button type="button" onClick={() => setView("create")}>
+                <Icon.Spark />
+                New application
+              </Button>
+            </div>
+
+            <div className="oauth-stat-grid">
+              <StatCard
+                label="Applications"
+                value={String(apps.length)}
+                meta={apps.length ? "Stored in this browser session" : "Create your first app to get started"}
+              />
+              <StatCard
+                label="Account ID"
+                value={user.id}
+                meta="Filled automatically during app creation"
+              />
+              <StatCard
+                label="API targets"
+                value="2"
+                meta="Core API for login, OAuth API for app management"
+              />
+            </div>
+
+            <div className="oauth-overview-head">
+              <div>
+                <h2>My Applications</h2>
+                <p>
+                  {apps.length
+                    ? "Open an app to see credentials, redirect URIs, and quick test tools."
+                    : "No apps yet. Create one and this dashboard will keep it handy for the rest of your session."}
+                </p>
+              </div>
+            </div>
+
+            <div className="oauth-toolbar">
+              <label className="oauth-toolbar__group">
+                <span>Sort by</span>
+                <select
+                  className="oauth-select"
+                  value={sortBy}
+                  onChange={(event) => setSortBy(event.target.value as "name" | "created")}
+                >
+                  <option value="created">Date created</option>
+                  <option value="name">Name</option>
+                </select>
+              </label>
+
+              <div className="oauth-toolbar__toggle">
+                <button
+                  type="button"
+                  className={classNames("oauth-toggle-button", density === "compact" && "is-active")}
+                  onClick={() => setDensity("compact")}
+                >
+                  Compact
+                </button>
+                <button
+                  type="button"
+                  className={classNames("oauth-toggle-button", density === "comfortable" && "is-active")}
+                  onClick={() => setDensity("comfortable")}
+                >
+                  Large
+                </button>
+              </div>
+            </div>
+
+            {sortedApps.length ? (
+              <div className={classNames("oauth-app-grid", density === "comfortable" && "oauth-app-grid--comfortable")}>
+                {sortedApps.map((app) => (
                   <button
+                    type="button"
                     key={app.app_id}
-                    onClick={() => {
-                      setSelectedApp(app);
-                      setView("detail");
-                    }}
-                    style={{
-                      background: "#2b2d31",
-                      border: "1px solid #1e1f22",
-                      borderRadius: 8,
-                      padding: "18px 22px",
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 16,
-                      textAlign: "left",
-                      fontFamily: "inherit",
-                      transition: "border-color .15s",
-                      width: "100%",
-                    }}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.borderColor = "#5865f2")
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.borderColor = "#1e1f22")
-                    }
+                    className="oauth-app-card"
+                    onClick={() => openDetail(app)}
                   >
-                    <div>
-                      <div
-                        style={{
-                          fontSize: 15,
-                          fontWeight: 600,
-                          color: "#f2f3f5",
-                          marginBottom: 2,
-                        }}
-                      >
-                        {app.app_name}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: "#949ba4",
-                          fontFamily: "monospace",
-                        }}
-                      >
-                        {app.app_id}
-                      </div>
+                    <div className="oauth-app-card__top">
+                      <Pill>{app.client_secret ? "New secret" : "Saved app"}</Pill>
                     </div>
-                    <Tag color="#5865f2">OAuth</Tag>
+                    <div className="oauth-app-card__body">
+                      <h3>{app.app_name}</h3>
+                      <code>{app.app_id}</code>
+                      <p>{app.description || "No description yet for this OAuth application."}</p>
+                    </div>
+                    <div className="oauth-app-card__footer">
+                      <span>Open details</span>
+                      <Icon.Arrow />
+                    </div>
                   </button>
                 ))}
               </div>
-            )}
-
-            {apps.length === 0 && (
-              <div
-                style={{
-                  background: "#2b2d31",
-                  borderRadius: 8,
-                  padding: "48px 24px",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  gap: 16,
-                  border: "2px dashed #1e1f22",
-                }}
-              >
-                <div style={{ fontSize: 40 }}>🧩</div>
-                <div style={{ textAlign: "center" }}>
-                  <p
-                    style={{
-                      margin: "0 0 4px",
-                      fontSize: 15,
-                      fontWeight: 600,
-                      color: "#f2f3f5",
-                    }}
-                  >
-                    No applications yet
-                  </p>
-                  <p style={{ margin: 0, fontSize: 13, color: "#949ba4" }}>
-                    Create your first OAuth app to get started.
-                  </p>
+            ) : (
+              <div className="oauth-empty-state">
+                <div className="oauth-empty-state__art" aria-hidden="true">
+                  <div className="oauth-empty-state__monitor" />
+                  <div className="oauth-empty-state__panel" />
+                  <div className="oauth-empty-state__orb oauth-empty-state__orb--lg" />
+                  <div className="oauth-empty-state__orb oauth-empty-state__orb--sm" />
                 </div>
-                <Button onClick={() => setView("create")}>
-                  <Icon.Plus /> Create Application
+                <h3>No applications yet</h3>
+                <p>
+                  Click New Application above to register your first OAuth client.
+                </p>
+                <Button type="button" onClick={() => setView("create")}>
+                  Create your first app
                 </Button>
               </div>
             )}
-          </div>
-        )}
-      </div>
-    </div>
+          </section>
+        ) : null}
+      </section>
+    </main>
   );
 }
-
-// ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [secret, setSecret] = useState("");
+  const [apps, setApps] = useState<OAuthApp[]>([]);
+  const [hydrated, setHydrated] = useState(false);
 
-  const handleLogin = (u: User, s: string) => {
-    setUser(u);
-    setSecret(s);
-  };
+  useEffect(() => {
+    const stored = safeParseSession();
+    if (stored) {
+      setUser(stored.user);
+      setSecret(stored.secret);
+      setApps(stored.apps);
+    }
+    setHydrated(true);
+  }, []);
 
-  return (
-    <>
-      <style>{`
-        * { box-sizing: border-box; }
-        body { margin: 0; background: #313338; font-family: 'gg sans', 'Noto Sans', Whitney, 'Helvetica Neue', Helvetica, Roboto, Arial, sans-serif; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #1e1f22; border-radius: 4px; }
-        input::placeholder { color: #4e5058; }
-      `}</style>
+  useEffect(() => {
+    if (!hydrated) return;
+    persistSession(user, secret, apps);
+  }, [user, secret, apps, hydrated]);
 
-      {!user ? (
-        <LoginView onLogin={handleLogin} />
-      ) : (
-        <Dashboard
-          user={user}
-          secret={secret}
-          onLogout={() => {
-            setUser(null);
-            setSecret("");
-          }}
-        />
-      )}
-    </>
+  if (!hydrated) {
+    return <main className="oauth-loading-screen">Loading developer portal…</main>;
+  }
+
+  return user && secret ? (
+    <Dashboard
+      user={user}
+      secret={secret}
+      apps={apps}
+      onAppsChange={setApps}
+      onLogout={() => {
+        setUser(null);
+        setSecret("");
+        setApps([]);
+      }}
+    />
+  ) : (
+    <LoginView
+      onLogin={(nextUser, nextSecret) => {
+        setUser(nextUser);
+        setSecret(nextSecret);
+      }}
+    />
   );
 }
