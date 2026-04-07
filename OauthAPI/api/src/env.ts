@@ -59,11 +59,11 @@ const Env = z.object({
   DB_PASSWORD: z.string(),
   DB_NAME: z.string().min(1),
   CORE_API_URL: z.preprocess(
-    (value) => emptyToUndefined(value) ?? "https://api.opencom.online",
+    (value) => emptyToUndefined(value) ?? "http://127.0.0.1:3000",
     z.string().url(),
   ),
   OAUTH_PUBLIC_URL: z.preprocess(
-    (value) => emptyToUndefined(value) ?? emptyToUndefined(process.env.CORE_API_URL) ?? "https://api.opencom.online",
+    (value) => emptyToUndefined(value) ?? "https://api.opencom.online",
     z.string().url(),
   ),
 });

@@ -106,12 +106,18 @@ async function fetchCoreJson(pathname: string, params: Record<string, string>) {
 
 async function requireAppAccess(secret: string, app_id: string) {
   const { ok, data } = await fetchCoreJson("/v1/oauth/access", { secret, app_id });
-  return ok && data.success === true && data.allowed === true;
+  return {
+    allowed: ok && data.success === true && data.allowed === true,
+    data,
+  };
 }
 
 async function ensureAppAccess(secret: string, app_id: string) {
   const { ok, data } = await fetchCoreJson("/v1/create", { secret, app_id });
-  return ok && data.success === true && data.allowed === true;
+  return {
+    allowed: ok && data.success === true && data.allowed === true,
+    data,
+  };
 }
 
 export function OauthRoutes(app: FastifyInstance) {
@@ -123,11 +129,14 @@ export function OauthRoutes(app: FastifyInstance) {
     const secret_code = body.secret_code;
     const user_id = body.user_id;
 
-    const allowed = await ensureAppAccess(secret_code, app_id);
-    if (!allowed)
+    const access = await ensureAppAccess(secret_code, app_id);
+    if (!access.allowed)
       return rep
         .status(401)
-        .send({ error: "You don't have permission to do this action!" });
+        .send({
+          error: "You don't have permission to do this action!",
+          detail: access.data?.message ?? access.data?.error ?? "APP_ACCESS_DENIED",
+        });
     if (!app_id) return rep.status(400).send({ error: "app_id is required" });
 
     const a = await registerApp(
@@ -146,11 +155,14 @@ export function OauthRoutes(app: FastifyInstance) {
     const app_id = String(body.app_id || "").trim();
     const secret_code = String(body.secret ?? body.secret_code ?? "").trim();
 
-    const allowed = await requireAppAccess(secret_code, app_id);
-    if (!allowed)
+    const access = await requireAppAccess(secret_code, app_id);
+    if (!access.allowed)
       return rep
         .status(401)
-        .send({ error: "You don't have permission to do this action!" });
+        .send({
+          error: "You don't have permission to do this action!",
+          detail: access.data?.message ?? access.data?.error ?? "APP_ACCESS_DENIED",
+        });
     if (!app_id) return rep.status(400).send({ error: "app_id is required" });
 
     const allowedFields = [
@@ -204,11 +216,14 @@ export function OauthRoutes(app: FastifyInstance) {
     const secret_code = body.secret_code;
     const app_id = body.app_id;
 
-    const allowed = await requireAppAccess(secret_code, app_id);
-    if (!allowed)
+    const access = await requireAppAccess(secret_code, app_id);
+    if (!access.allowed)
       return rep
         .status(401)
-        .send({ error: "You don't have permission to do this action!" });
+        .send({
+          error: "You don't have permission to do this action!",
+          detail: access.data?.message ?? access.data?.error ?? "APP_ACCESS_DENIED",
+        });
     if (!app_id) return rep.status(400).send({ error: "app_id is required" });
 
     await q(`DELETE FROM oauth_apps WHERE app_id = :app_id`, { app_id });
@@ -219,10 +234,14 @@ export function OauthRoutes(app: FastifyInstance) {
   async function generateLinkHandler(req: any, rep: any) {
     const { secret, app_id } = parseBody(GenerateLinkSchema, req.body);
 
-    if (!(await requireAppAccess(secret, app_id))) {
+    const access = await requireAppAccess(secret, app_id);
+    if (!access.allowed) {
       return rep
         .code(403)
-        .send({ success: false, message: "App not allowed for this secret" });
+        .send({
+          success: false,
+          message: access.data?.message ?? access.data?.error ?? "App not allowed for this secret",
+        });
     }
 
     const scopes = await q<{ scope: string }>(
