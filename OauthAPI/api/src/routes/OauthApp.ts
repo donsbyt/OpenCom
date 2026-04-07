@@ -46,7 +46,7 @@ async function registerApp(
     .filter(Boolean);
 
   await q(
-    `INSERT INTO oauth_apps (account_id, app_id, app_name, description, client_secret_hash, redirect_uris)
+    `INSERT INTO oauth_apps (user_id, app_id, app_name, description, client_secret_hash, redirect_uris)
      VALUES (:userId, :app_id, :app_name, :description, :client_secret_hash, :redirect_uris)`,
     {
       userId: owner_id,

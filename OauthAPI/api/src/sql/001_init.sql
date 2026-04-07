@@ -11,7 +11,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 -- =========================================================
 CREATE TABLE IF NOT EXISTS oauth_apps (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    account_id BIGINT UNSIGNED NOT NULL, -- owner of the OAuth app
+    user_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL, -- owner of the OAuth app
 
     app_id CHAR(36) NOT NULL,            -- public client/application ID
     app_name VARCHAR(150) NOT NULL,
@@ -29,10 +29,10 @@ CREATE TABLE IF NOT EXISTS oauth_apps (
 
     PRIMARY KEY (id),
     UNIQUE KEY uq_oauth_apps_app_id (app_id),
-    KEY idx_oauth_apps_account_id (account_id),
+    KEY idx_oauth_apps_user_id (user_id),
 
-    CONSTRAINT fk_oauth_apps_account
-        FOREIGN KEY (account_id) REFERENCES accounts(id)
+    CONSTRAINT fk_oauth_apps_user
+        FOREIGN KEY (user_id) REFERENCES users(id)
         ON DELETE CASCADE
         ON UPDATE CASCADE,
 
@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 
     oauth_app_id BIGINT UNSIGNED NOT NULL,
-    account_id BIGINT UNSIGNED NOT NULL, -- user/account that authorized the token
+    user_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL, -- user that authorized the token
 
     access_token_hash VARCHAR(255) NOT NULL,
     refresh_token_hash VARCHAR(255) NULL,
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
     UNIQUE KEY uq_oauth_tokens_jti (jti),
 
     KEY idx_oauth_tokens_oauth_app_id (oauth_app_id),
-    KEY idx_oauth_tokens_account_id (account_id),
+    KEY idx_oauth_tokens_user_id (user_id),
     KEY idx_oauth_tokens_is_active (is_active),
     KEY idx_oauth_tokens_access_expires_at (access_expires_at),
     KEY idx_oauth_tokens_refresh_expires_at (refresh_expires_at),
@@ -128,8 +128,8 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
         ON DELETE CASCADE
         ON UPDATE CASCADE,
 
-    CONSTRAINT fk_oauth_tokens_account
-        FOREIGN KEY (account_id) REFERENCES accounts(id)
+    CONSTRAINT fk_oauth_tokens_user
+        FOREIGN KEY (user_id) REFERENCES users(id)
         ON DELETE CASCADE
         ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 
     oauth_app_id BIGINT UNSIGNED NOT NULL,
-    account_id BIGINT UNSIGNED NOT NULL,
+    user_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
 
     authorization_code_hash VARCHAR(255) NOT NULL,
     code_challenge VARCHAR(255) NULL,
@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
     PRIMARY KEY (id),
     UNIQUE KEY uq_oauth_authorization_codes_hash (authorization_code_hash),
     KEY idx_oauth_authorization_codes_oauth_app_id (oauth_app_id),
-    KEY idx_oauth_authorization_codes_account_id (account_id),
+    KEY idx_oauth_authorization_codes_user_id (user_id),
     KEY idx_oauth_authorization_codes_expires_at (expires_at),
 
     CONSTRAINT fk_oauth_authorization_codes_app
@@ -195,8 +195,8 @@ CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
         ON DELETE CASCADE
         ON UPDATE CASCADE,
 
-    CONSTRAINT fk_oauth_authorization_codes_account
-        FOREIGN KEY (account_id) REFERENCES accounts(id)
+    CONSTRAINT fk_oauth_authorization_codes_user
+        FOREIGN KEY (user_id) REFERENCES users(id)
         ON DELETE CASCADE
         ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
