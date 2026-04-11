@@ -236,7 +236,8 @@ export async function attachmentRoutes(app: FastifyInstance) {
       throw error;
     }
 
-    const publicUrl = `${env.PUBLIC_BASE_URL}/v1/attachments/${finalized.attachmentId}`;
+    // Always hand clients the API route, never a direct object-storage URL.
+    const apiUrl = `${env.PUBLIC_BASE_URL}/v1/attachments/${finalized.attachmentId}`;
 
     return rep.send({
       attachmentId: finalized.attachmentId,
@@ -246,7 +247,7 @@ export async function attachmentRoutes(app: FastifyInstance) {
       tier: String(session.context.tier || uploadContext.tier),
       maxBytes: session.maxBytes,
       expiresAt: expiresAt.toISOString(),
-      url: publicUrl
+      url: apiUrl
     });
   });
 
@@ -368,7 +369,8 @@ export async function attachmentRoutes(app: FastifyInstance) {
       throw error;
     }
 
-    const publicUrl = `${env.PUBLIC_BASE_URL}/v1/attachments/${attachmentId}`;
+    // Always hand clients the API route, never a direct object-storage URL.
+    const apiUrl = `${env.PUBLIC_BASE_URL}/v1/attachments/${attachmentId}`;
 
     return rep.send({
       attachmentId,
@@ -378,7 +380,7 @@ export async function attachmentRoutes(app: FastifyInstance) {
       tier: uploadContext.tier,
       maxBytes: uploadContext.maxUploadBytes,
       expiresAt: expiresAt.toISOString(),
-      url: publicUrl
+      url: apiUrl
     });
   });
 

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { Readable } from "node:stream";
+import { Storage } from "@google-cloud/storage";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -8,11 +9,17 @@ import {
 } from "@aws-sdk/client-s3";
 import { env } from "./env.js";
 
-const s3KeyPrefix = normalizePrefix(env.S3_KEY_PREFIX || "");
+const objectKeyPrefix = normalizePrefix(env.S3_KEY_PREFIX || "");
 let s3Client: S3Client | null | undefined;
+let gcsClient: Storage | null | undefined;
 
+export function isObjectStorageEnabled() {
+  return env.STORAGE_PROVIDER === "s3" || env.STORAGE_PROVIDER === "gcs";
+}
+
+// Kept for compatibility with existing call sites.
 export function isS3StorageEnabled() {
-  return env.STORAGE_PROVIDER === "s3";
+  return isObjectStorageEnabled();
 }
 
 export async function uploadFileToObjectStorage(
@@ -21,12 +28,13 @@ export async function uploadFileToObjectStorage(
   absoluteFilePath: string,
   contentType?: string,
 ) {
-  const client = getS3Client();
-  if (!client) return;
+  if (!isObjectStorageEnabled()) return;
 
-  const key = resolveS3Key(namespace, objectKey);
+  const key = resolveObjectKey(namespace, objectKey);
+  const bucket = resolveBucketName();
   const baseMeta = {
-    bucket: env.CORE_S3_BUCKET,
+    provider: env.STORAGE_PROVIDER,
+    bucket,
     key,
     absoluteFilePath,
     contentType: contentType || null,
@@ -37,28 +45,36 @@ export async function uploadFileToObjectStorage(
     const stat = await fs.promises.stat(absoluteFilePath);
     sizeBytes = stat.size;
   } catch (error) {
-    console.error("[core:s3] put_object:failed", { ...baseMeta, error });
+    console.error("[core:storage] put_object:failed", { ...baseMeta, error });
     throw error;
   }
 
-  const meta = {
-    ...baseMeta,
-    sizeBytes,
-  };
+  const meta = { ...baseMeta, sizeBytes };
+  console.info("[core:storage] put_object:start", meta);
 
-  console.info("[core:s3] put_object:start", meta);
   try {
-    await client.send(
-      new PutObjectCommand({
-        Bucket: env.CORE_S3_BUCKET,
-        Key: key,
-        Body: fs.createReadStream(absoluteFilePath),
-        ContentType: contentType,
-      }),
-    );
-    console.info("[core:s3] put_object:success", meta);
+    if (env.STORAGE_PROVIDER === "gcs") {
+      const gcsBucket = getGcsBucket();
+      if (!gcsBucket) return;
+      await gcsBucket.upload(absoluteFilePath, {
+        destination: key,
+        metadata: contentType ? { contentType } : undefined,
+      });
+    } else {
+      const client = getS3Client();
+      if (!client || !bucket) return;
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: fs.createReadStream(absoluteFilePath),
+          ContentType: contentType,
+        }),
+      );
+    }
+    console.info("[core:storage] put_object:success", meta);
   } catch (error) {
-    console.error("[core:s3] put_object:failed", { ...meta, error });
+    console.error("[core:storage] put_object:failed", { ...meta, error });
     throw error;
   }
 }
@@ -69,30 +85,42 @@ export async function uploadBufferToObjectStorage(
   body: Buffer,
   contentType?: string,
 ) {
-  const client = getS3Client();
-  if (!client) return;
+  if (!isObjectStorageEnabled()) return;
 
-  const key = resolveS3Key(namespace, objectKey);
+  const key = resolveObjectKey(namespace, objectKey);
+  const bucket = resolveBucketName();
   const meta = {
-    bucket: env.CORE_S3_BUCKET,
+    provider: env.STORAGE_PROVIDER,
+    bucket,
     key,
     contentType: contentType || null,
     sizeBytes: body.length,
   };
 
-  console.info("[core:s3] put_object:start", meta);
+  console.info("[core:storage] put_object:start", meta);
   try {
-    await client.send(
-      new PutObjectCommand({
-        Bucket: env.CORE_S3_BUCKET,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-      }),
-    );
-    console.info("[core:s3] put_object:success", meta);
+    if (env.STORAGE_PROVIDER === "gcs") {
+      const gcsBucket = getGcsBucket();
+      if (!gcsBucket) return;
+      await gcsBucket.file(key).save(body, {
+        resumable: false,
+        contentType,
+      });
+    } else {
+      const client = getS3Client();
+      if (!client || !bucket) return;
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: body,
+          ContentType: contentType,
+        }),
+      );
+    }
+    console.info("[core:storage] put_object:success", meta);
   } catch (error) {
-    console.error("[core:s3] put_object:failed", { ...meta, error });
+    console.error("[core:storage] put_object:failed", { ...meta, error });
     throw error;
   }
 }
@@ -101,13 +129,25 @@ export async function getObjectStreamFromStorage(
   namespace: string,
   objectKey: string,
 ): Promise<Readable | null> {
+  const key = resolveObjectKey(namespace, objectKey);
+
+  if (env.STORAGE_PROVIDER === "gcs") {
+    const gcsBucket = getGcsBucket();
+    if (!gcsBucket) return null;
+    const file = gcsBucket.file(key);
+    const [exists] = await file.exists();
+    if (!exists) return null;
+    return file.createReadStream();
+  }
+
   const client = getS3Client();
-  if (!client) return null;
+  const bucket = resolveBucketName();
+  if (!client || !bucket) return null;
   try {
     const result = await client.send(
       new GetObjectCommand({
-        Bucket: env.CORE_S3_BUCKET,
-        Key: resolveS3Key(namespace, objectKey),
+        Bucket: bucket,
+        Key: key,
       }),
     );
     return toReadable(result.Body);
@@ -118,13 +158,27 @@ export async function getObjectStreamFromStorage(
 }
 
 export async function deleteObjectFromStorage(namespace: string, objectKey: string) {
+  const key = resolveObjectKey(namespace, objectKey);
+
+  if (env.STORAGE_PROVIDER === "gcs") {
+    const gcsBucket = getGcsBucket();
+    if (!gcsBucket) return;
+    try {
+      await gcsBucket.file(key).delete();
+    } catch (error) {
+      if (!isGcsNotFound(error)) throw error;
+    }
+    return;
+  }
+
   const client = getS3Client();
-  if (!client) return;
+  const bucket = resolveBucketName();
+  if (!client || !bucket) return;
   try {
     await client.send(
       new DeleteObjectCommand({
-        Bucket: env.CORE_S3_BUCKET,
-        Key: resolveS3Key(namespace, objectKey),
+        Bucket: bucket,
+        Key: key,
       }),
     );
   } catch (error) {
@@ -132,18 +186,22 @@ export async function deleteObjectFromStorage(namespace: string, objectKey: stri
   }
 }
 
-function resolveS3Key(namespace: string, objectKey: string) {
+function resolveObjectKey(namespace: string, objectKey: string) {
   const cleanNamespace = normalizePrefix(namespace);
   const cleanObjectKey = String(objectKey || "").replace(/^\/+/, "");
-  return [s3KeyPrefix, cleanNamespace, cleanObjectKey].filter(Boolean).join("/");
+  return [objectKeyPrefix, cleanNamespace, cleanObjectKey].filter(Boolean).join("/");
 }
 
 function normalizePrefix(value: string) {
   return String(value || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
+function resolveBucketName() {
+  return env.CORE_STORAGE_BUCKET || env.CORE_S3_BUCKET || null;
+}
+
 function getS3Client() {
-  if (!isS3StorageEnabled()) return null;
+  if (env.STORAGE_PROVIDER !== "s3") return null;
   if (s3Client !== undefined) return s3Client;
 
   s3Client = new S3Client({
@@ -158,6 +216,22 @@ function getS3Client() {
       : undefined,
   });
   return s3Client;
+}
+
+function getGcsClient() {
+  if (env.STORAGE_PROVIDER !== "gcs") return null;
+  if (gcsClient !== undefined) return gcsClient;
+  gcsClient = new Storage({
+    projectId: env.GCS_PROJECT_ID,
+  });
+  return gcsClient;
+}
+
+function getGcsBucket() {
+  const client = getGcsClient();
+  const bucket = resolveBucketName();
+  if (!client || !bucket) return null;
+  return client.bucket(bucket);
 }
 
 function toReadable(value: unknown): Readable | null {
@@ -181,4 +255,9 @@ function toReadable(value: unknown): Readable | null {
 function isS3NotFound(error: unknown) {
   const err = error as { name?: string; $metadata?: { httpStatusCode?: number } } | null;
   return err?.name === "NoSuchKey" || err?.$metadata?.httpStatusCode === 404;
+}
+
+function isGcsNotFound(error: unknown) {
+  const err = error as { code?: number } | null;
+  return err?.code === 404;
 }

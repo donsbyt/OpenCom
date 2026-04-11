@@ -145,6 +145,13 @@ function normalizeMediaReference(value: string) {
   return trimmed;
 }
 
+function buildProfileProxyUrl(relPath: string) {
+  const base = env.PROFILE_IMAGE_BASE_URL.replace(/\/$/, "");
+  const normalizedRelPath = String(relPath || "").replace(/^\/+/, "");
+  // Internal media should always resolve through the backend profile-image route.
+  return `${base}/${normalizedRelPath}`;
+}
+
 function clampNumber(value: any, min: number, max: number, fallback: number) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -412,7 +419,7 @@ export async function profileRoutes(app: FastifyInstance) {
       return rep.code(500).send({ error: "SAVE_FAILED" });
     }
     await deleteProfileObjectEverywhere(oldRel);
-    const url = `${env.PROFILE_IMAGE_BASE_URL}/${saved}`;
+    const url = buildProfileProxyUrl(saved);
     await q(
       `UPDATE users SET ${imageType === "pfp" ? "pfp_url" : "banner_url"} = :url WHERE id=:userId`,
       { url, userId }
@@ -447,7 +454,7 @@ export async function profileRoutes(app: FastifyInstance) {
       deleteProfileImage(env.PROFILE_IMAGE_STORAGE_DIR, saved);
       return rep.code(500).send({ error: "SAVE_FAILED" });
     }
-    return rep.send({ imageUrl: `${env.PROFILE_IMAGE_BASE_URL}/${saved}` });
+    return rep.send({ imageUrl: buildProfileProxyUrl(saved) });
   });
 
   app.post("/v1/media/upload", { preHandler: [app.authenticate] } as any, async (req: any, rep) => {
@@ -477,7 +484,7 @@ export async function profileRoutes(app: FastifyInstance) {
       deleteProfileImage(env.PROFILE_IMAGE_STORAGE_DIR, saved);
       return rep.code(500).send({ error: "SAVE_FAILED" });
     }
-    return rep.send({ mediaUrl: `${env.PROFILE_IMAGE_BASE_URL}/${saved}` });
+    return rep.send({ mediaUrl: buildProfileProxyUrl(saved) });
   });
 
   async function buildUserProfileResponse(id: string, includePrivate = false) {
@@ -657,7 +664,7 @@ export async function profileRoutes(app: FastifyInstance) {
           }
           const oldRel = relPathFromStoredUrl(pfpUrl);
           await deleteProfileObjectEverywhere(oldRel);
-          pfpUrl = `${env.PROFILE_IMAGE_BASE_URL}/${saved}`;
+          pfpUrl = buildProfileProxyUrl(saved);
         } else {
           return rep.code(400).send({ error: "INVALID_IMAGE", field: "pfpUrl" });
         }
@@ -687,7 +694,7 @@ export async function profileRoutes(app: FastifyInstance) {
           }
           const oldRel = relPathFromStoredUrl(bannerUrl);
           await deleteProfileObjectEverywhere(oldRel);
-          bannerUrl = `${env.PROFILE_IMAGE_BASE_URL}/${saved}`;
+          bannerUrl = buildProfileProxyUrl(saved);
         } else {
           return rep.code(400).send({ error: "INVALID_IMAGE", field: "bannerUrl" });
         }

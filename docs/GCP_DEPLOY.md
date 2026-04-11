@@ -60,7 +60,6 @@ Here is the mental translation from "generic cloud" to GCP:
 - managed Redis: Memorystore
 - private container registry: Artifact Registry
 - IAM users/roles/service identities: IAM + Service Accounts
-- GitHub OIDC auth into cloud: Workload Identity Federation
 - secrets store: Secret Manager
 - VM for special networking: Compute Engine
 - public entry point with TLS/custom host routing: Global external Application Load Balancer
@@ -95,22 +94,20 @@ Do not start with the media service if you are still learning GCP.
 
 This repo now includes:
 
-- GitHub Actions workflow for `core`
-- GitHub Actions workflow for `node`
-- GitHub Actions workflow for `media`
-- a reusable shared workflow for Cloud Run deploys
 - service-specific env files:
   - `backend/core.env`
   - `backend/node.env`
   - `backend/media.env`
 - a local containerized runner:
   - `scripts/deploy/run-backend-service.sh`
+- a direct GCP deploy helper:
+  - `scripts/deploy/gcp-deploy.sh`
 
 So your job is mostly:
 
 1. create the GCP resources
-2. put the right values into GitHub
-3. trigger the workflows
+2. fill out your local env files
+3. deploy with `gcloud`
 
 ## Step 1: Create A GCP Project
 
@@ -148,7 +145,7 @@ If you use the console, search "APIs & Services" and enable them there.
 
 ## Step 3: Create Artifact Registry
 
-This is where the GitHub workflow pushes images before Cloud Run deploys them.
+This is where your local deploy script pushes images before Cloud Run deploys them.
 
 Create:
 
@@ -195,15 +192,13 @@ MEDIA_DATABASE_URL=mysql://opencom:password@127.0.0.1:3306/ods_node
 
 Why `127.0.0.1`?
 
-Because when Cloud Run is connected to Cloud SQL using the Cloud SQL integration, your app commonly connects through the local Cloud SQL connector path or local endpoint behavior provided by the platform setup. In this repo’s workflow, the important deploy-time part is attaching the Cloud SQL instance to the service.
+Because when Cloud Run is connected to Cloud SQL using the Cloud SQL integration, your app commonly connects through the local Cloud SQL connector path or local endpoint behavior provided by the platform setup. In this repo, the important deploy-time part is attaching the Cloud SQL instance to the service.
 
-For Cloud Run in this repo, the workflow supports:
+For Cloud Run in this repo, the helper script supports:
 
-- `OPENCOM_CORE_CLOUDSQL_INSTANCES`
-- `OPENCOM_NODE_CLOUDSQL_INSTANCES`
-- `OPENCOM_MEDIA_CLOUDSQL_INSTANCES`
+- `--cloudsql PROJECT:REGION:INSTANCE`
 
-Those should be in the form:
+That value should be in the form:
 
 ```text
 PROJECT_ID:REGION:INSTANCE_NAME
@@ -253,120 +248,87 @@ The runtime accounts need permissions based on what the app touches, for example
 - Cloud SQL Client
 - Secret Manager Secret Accessor if you wire secrets that way
 
-## Step 7: Set Up GitHub Authentication To GCP
+## Step 7: Authenticate Your Machine To GCP
 
-You have two ways to let GitHub deploy into GCP:
+You are deploying from your own machine now, so authenticate `gcloud` locally.
 
-1. Workload Identity Federation
-2. service account JSON key
+Basic flow:
 
-Use Workload Identity Federation unless you have a specific reason not to.
+1. install Google Cloud CLI
+2. run `gcloud auth login`
+3. run `gcloud auth application-default login` if you need ADC-backed tools too
+4. select your project with `gcloud config set project PROJECT_ID`
 
-Why:
+You do not need GitHub OIDC or GitHub deploy secrets for this path.
 
-- no long-lived JSON key sitting in GitHub secrets
-- closer to how modern cloud CI/CD should work
+## Step 7.5: Buckets And IAM
 
-High-level setup:
+For `core` and `node`, the repo now supports native Google Cloud Storage.
 
-1. create a Workload Identity Pool
-2. create an OIDC provider for GitHub
-3. restrict it to your GitHub org/repo
-4. allow that identity to impersonate your deploy service account
+Use env like:
 
-You do not need to memorize the IAM theory. The important mental model is:
+```env
+STORAGE_PROVIDER=gcs
+CORE_STORAGE_BUCKET=your-core-bucket
+NODE_STORAGE_BUCKET=your-node-bucket
+GCS_PROJECT_ID=your-project-id
+```
 
-- GitHub proves who it is with OIDC
-- GCP trusts that identity for this repo
-- that identity is allowed to act as your deploy service account
+You do not need static storage access keys for this path.
 
-The workflow in this repo expects these GitHub secrets:
+Instead:
 
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`
-- `GCP_DEPLOY_SERVICE_ACCOUNT`
+1. create the bucket
+2. give the runtime service account access to that bucket
+3. attach that service account to Cloud Run or GCE
 
-Or, if you insist on key-based auth:
+Typical bucket role:
 
-- `GCP_CREDENTIALS_JSON`
+- `Storage Object Admin` if the service needs to create, read, and delete objects
 
-## Step 8: Put Your Runtime Env Into GitHub Secrets
+This is the GCP equivalent of assigning a bucket-capable IAM role to the workload.
 
-Each service workflow expects one big env blob secret.
+Recommended access model:
 
-That means:
+- keep the buckets private
+- let the backend service account access them
+- have the backend stream files to clients through API routes
 
-- `OPENCOM_CORE_ENV`
-- `OPENCOM_NODE_ENV`
-- `OPENCOM_MEDIA_ENV`
+That way clients do not need direct bucket URLs, and storage stays behind your auth/permission checks.
 
-Take the contents of:
+## Step 8: Fill Out Your Local Env Files
+
+Use these as your source of truth:
 
 - `backend/core.env`
 - `backend/node.env`
 - `backend/media.env`
 
-and paste each one into the matching GitHub secret.
+Do not commit the real files.
 
-Important:
+The deploy script uses those files directly with Cloud Run.
 
-- do not commit the real env files
-- do not put secrets into GitHub repository variables
-- use GitHub Secrets for anything sensitive
+## Step 9: Deploy Core First
 
-Use GitHub Variables for non-secret config like service names and regions.
+Use the helper script:
 
-## Step 9: Add GitHub Variables
-
-Set these repository variables:
-
-- `GCP_PROJECT_ID`
-- `GCP_REGION`
-- `GCP_ARTIFACT_REGISTRY_REGION`
-- `GCP_ARTIFACT_REGISTRY_REPOSITORY`
-- `OPENCOM_CORE_SERVICE`
-- `OPENCOM_NODE_SERVICE`
-- `OPENCOM_MEDIA_SERVICE`
-
-Optional but useful:
-
-- `OPENCOM_CORE_RUNTIME_SERVICE_ACCOUNT`
-- `OPENCOM_NODE_RUNTIME_SERVICE_ACCOUNT`
-- `OPENCOM_MEDIA_RUNTIME_SERVICE_ACCOUNT`
-- `OPENCOM_CORE_CLOUDSQL_INSTANCES`
-- `OPENCOM_NODE_CLOUDSQL_INSTANCES`
-- `OPENCOM_MEDIA_CLOUDSQL_INSTANCES`
-- `OPENCOM_CORE_VPC_CONNECTOR`
-- `OPENCOM_NODE_VPC_CONNECTOR`
-- `OPENCOM_MEDIA_VPC_CONNECTOR`
-
-Example values:
-
-```text
-GCP_PROJECT_ID=opencom-prod
-GCP_REGION=europe-west2
-GCP_ARTIFACT_REGISTRY_REGION=europe-west2
-GCP_ARTIFACT_REGISTRY_REPOSITORY=opencom
-OPENCOM_CORE_SERVICE=opencom-core
-OPENCOM_NODE_SERVICE=opencom-node
-OPENCOM_MEDIA_SERVICE=opencom-media
+```bash
+./scripts/deploy/gcp-deploy.sh core \
+  --project-id opencom-prod \
+  --region europe-west2 \
+  --artifact-repo opencom
 ```
 
-## Step 10: Deploy Core First
+You can optionally add:
 
-Go to:
-
-- GitHub
-- Actions
-- `Deploy OpenCom Core`
-- Run workflow
-
-You will be able to set:
-
-- `min_instances`
-- `max_instances`
-- `concurrency`
-- `cpu`
-- `memory`
+- `--min-instances`
+- `--max-instances`
+- `--concurrency`
+- `--cpu`
+- `--memory`
+- `--cloudsql`
+- `--vpc-connector`
+- `--service-account`
 
 Suggested starting point for `core`:
 
@@ -417,14 +379,14 @@ Safe starting defaults:
 
 - do not think of this as normal Cloud Run scaling for production voice
 
-## Step 12: Deploy Node
+## Step 10: Deploy Node
 
 After `core` is up and healthy:
 
 1. check the real `core` URL
 2. make sure `node.env` points at it
 3. update `OPENCOM_NODE_ENV` in GitHub if needed
-4. run `Deploy OpenCom Node`
+4. deploy it
 
 Double-check these values in `node.env`:
 
@@ -438,13 +400,23 @@ Double-check these values in `node.env`:
 
 If `node` is on Cloud Run and `media` is elsewhere, `MEDIA_SERVER_URL` and `MEDIA_WS_URL` should point at the media service, not the node service.
 
-## Step 13: Handle Media The Right Way
+Example command:
+
+```bash
+./scripts/deploy/gcp-deploy.sh node \
+  --project-id opencom-prod \
+  --region europe-west2 \
+  --artifact-repo opencom \
+  --cloudsql PROJECT:REGION:INSTANCE
+```
+
+## Step 11: Handle Media The Right Way
 
 Blunt version:
 
-- do not assume `Deploy OpenCom Media` means production-ready voice
+- do not assume a Cloud Run deploy of `media` means production-ready voice
 
-That workflow exists because you asked for symmetry and because it can still be useful for testing, staging, or non-production experiments.
+You can still use the helper script for experiments, staging, or non-production tests.
 
 But for production voice:
 
@@ -458,7 +430,7 @@ If you are still getting the stack online, it is completely reasonable to:
 - deploy `node`
 - leave `media` for after everything else is stable
 
-## Step 14: Connect Cloudflare
+## Step 12: Connect Cloudflare
 
 Cloudflare is not the deploy engine here.
 
@@ -492,7 +464,7 @@ Likely domain layout:
 
 Then set the corresponding URLs in your env files.
 
-## Step 15: Local Deploys
+## Step 13: Local Deploys
 
 If you want to run the backend services locally in the same basic container form used for deployment:
 
@@ -527,14 +499,13 @@ Do it in this order:
 3. create Artifact Registry
 4. create Cloud SQL
 5. create Memorystore
-6. create deploy/runtime service accounts
-7. set up Workload Identity Federation for GitHub
+6. create runtime service accounts
+7. authenticate `gcloud` locally
 8. fill out `core.env`, `node.env`, `media.env`
-9. put those env files into GitHub secrets
-10. deploy `core`
-11. deploy `node`
-12. put Cloudflare in front
-13. deal with `media`
+9. deploy `core`
+10. deploy `node`
+11. put Cloudflare in front
+12. deal with `media`
 
 If you skip around too much, you will spend your time debugging missing IAM permissions and broken URLs.
 
@@ -549,16 +520,14 @@ Usually one of:
 - private networking not configured
 - runtime service account missing Cloud SQL permissions
 
-### "Why is GitHub failing auth?"
+### "Why is `gcloud` failing auth?"
 
 Usually one of:
 
-- wrong Workload Identity Provider string
-- repo/org restriction mismatch
-- deploy service account not allowed to be impersonated
-- forgot `id-token: write` permission in workflow
-
-This repo’s workflows already include the needed GitHub permission block.
+- wrong active project
+- logged into the wrong Google account
+- your account lacks the needed IAM roles
+- Artifact Registry or Cloud Run APIs are not enabled
 
 ### "Why is Cloudflare not working?"
 
@@ -592,6 +561,8 @@ Put:
 - membership JWKs
 - public app/support URLs
 - node/media integration URLs
+- `STORAGE_PROVIDER=gcs`
+- `CORE_STORAGE_BUCKET`
 
 ### `node.env`
 
@@ -603,6 +574,8 @@ Put:
 - media URLs
 - sync secret
 - storage config
+- `STORAGE_PROVIDER=gcs`
+- `NODE_STORAGE_BUCKET`
 - voice/TURN config
 
 ### `media.env`
@@ -635,9 +608,7 @@ That is the "not stupid, not overcomplicated" path.
 - [backend/core.env.example](/home/don/development/OpenCom/backend/core.env.example)
 - [backend/node.env.example](/home/don/development/OpenCom/backend/node.env.example)
 - [backend/media.env.example](/home/don/development/OpenCom/backend/media.env.example)
-- [.github/workflows/deploy-opencom-core.yml](/home/don/development/OpenCom/.github/workflows/deploy-opencom-core.yml)
-- [.github/workflows/deploy-opencom-node.yml](/home/don/development/OpenCom/.github/workflows/deploy-opencom-node.yml)
-- [.github/workflows/deploy-opencom-media.yml](/home/don/development/OpenCom/.github/workflows/deploy-opencom-media.yml)
+- [scripts/deploy/gcp-deploy.sh](/home/don/development/OpenCom/scripts/deploy/gcp-deploy.sh)
 - [scripts/deploy/run-backend-service.sh](/home/don/development/OpenCom/scripts/deploy/run-backend-service.sh)
 
 ## Official References
@@ -651,6 +622,4 @@ These are the main upstream docs this guide is based on:
 - Cloud Run custom domains / load balancer guidance: https://cloud.google.com/run/docs/mapping-custom-domains
 - Cloud SQL from Cloud Run: https://cloud.google.com/sql/docs/mysql/connect-run
 - Artifact Registry with Cloud Run: https://cloud.google.com/artifact-registry/docs/integrate-cloud-run
-- Workload Identity Federation overview: https://cloud.google.com/iam/docs/workload-identity-federation
-- Google GitHub auth action: https://github.com/google-github-actions/auth
-- Google GitHub Cloud Run deploy action: https://github.com/google-github-actions/deploy-cloudrun
+- gcloud run deploy reference: https://cloud.google.com/sdk/gcloud/reference/run/deploy

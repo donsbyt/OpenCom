@@ -70,9 +70,24 @@ const Env = z.object({
   ATTACHMENT_BOOST_MAX_BYTES: z.coerce.number().default(104857600),
   ATTACHMENT_TTL_DAYS: z.coerce.number().default(365),
   ATTACHMENT_STORAGE_DIR: z.string().default("./data/attachments"),
-  STORAGE_PROVIDER: z.enum(["local", "s3"]).default("local"),
+  STORAGE_PROVIDER: z.enum(["local", "s3", "gcs"]).default("local"),
+  NODE_STORAGE_BUCKET: z.preprocess(
+    (value) =>
+      value ??
+      process.env.NODE_GCS_BUCKET ??
+      process.env.NODE_S3_BUCKET ??
+      process.env.S3_BUCKET,
+    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  ),
   NODE_S3_BUCKET: z.preprocess(
     (value) => value ?? process.env.S3_BUCKET,
+    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  ),
+  GCS_PROJECT_ID: z.preprocess(
+    (value) =>
+      value ??
+      process.env.GOOGLE_CLOUD_PROJECT ??
+      process.env.GCLOUD_PROJECT,
     z.preprocess(emptyToUndefined, z.string().min(1).optional())
   ),
   S3_REGION: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
@@ -123,12 +138,16 @@ const Env = z.object({
 export const env = Env.parse(process.env);
 
 if (env.STORAGE_PROVIDER === "s3") {
-  if (!env.NODE_S3_BUCKET) {
-    throw new Error("NODE_S3_BUCKET (or S3_BUCKET) is required when STORAGE_PROVIDER=s3");
+  if (!(env.NODE_STORAGE_BUCKET || env.NODE_S3_BUCKET)) {
+    throw new Error("NODE_STORAGE_BUCKET/NODE_S3_BUCKET (or S3_BUCKET) is required when STORAGE_PROVIDER=s3");
   }
   if (!env.S3_REGION) {
     throw new Error("S3_REGION is required when STORAGE_PROVIDER=s3");
   }
+}
+
+if (env.STORAGE_PROVIDER === "gcs" && !env.NODE_STORAGE_BUCKET) {
+  throw new Error("NODE_STORAGE_BUCKET (or NODE_GCS_BUCKET) is required when STORAGE_PROVIDER=gcs");
 }
 
 if (env.MEDIASOUP_RTC_MIN_PORT > env.MEDIASOUP_RTC_MAX_PORT) {

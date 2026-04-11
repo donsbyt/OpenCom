@@ -266,7 +266,8 @@ async function persistClientReleaseRecord(input: {
     mimeType: mime,
     fileSize,
     checksum,
-    downloadUrl: `${env.PROFILE_IMAGE_BASE_URL}/${savedPath}`,
+    // Client builds are served via the backend download route, not directly from storage.
+    downloadUrl: `/v1/client/builds/${clientId}/download`,
     releaseNotes: releaseNotes ?? null,
   };
 }

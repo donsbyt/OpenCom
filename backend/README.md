@@ -75,6 +75,13 @@ Run a backend service locally in the same containerized shape used for deploys:
 ./scripts/deploy/run-backend-service.sh core --replicas 2 --port 3100
 ```
 
+Deploy directly to Cloud Run from your machine using your local env files:
+
+```bash
+./scripts/deploy/gcp-deploy.sh core --project-id YOUR_PROJECT --region europe-southwest1 --artifact-repo opencom
+./scripts/deploy/gcp-deploy.sh node --project-id YOUR_PROJECT --region europe-southwest1 --artifact-repo opencom
+```
+
 Env loading order:
 
 - explicit override env var first: `CORE_ENV_FILE`, `NODE_ENV_FILE`, `MEDIA_ENV_FILE`
@@ -111,6 +118,7 @@ Cloud Run-specific runtime behavior:
 - `PORT` is respected automatically by `core`, `server-node`, `media`, OAuth API, and Internal Stats API
 - services bind to `0.0.0.0` automatically on Cloud Run when host is not set explicitly
 - file logging defaults off on Cloud Run so logs stay in stdout/stderr
+- `core` and `node` support `STORAGE_PROVIDER=gcs` for native Google Cloud Storage using the runtime service account
 
 Important limitation:
 
@@ -119,42 +127,26 @@ Important limitation:
 - `server-node` can run there for plain HTTP/WebSocket API traffic, but its voice stack still depends on mediasoup/WebRTC behavior outside typical Cloud Run networking assumptions
 - `media` is not a real Cloud Run fit for production voice because mediasoup needs its own reachable RTC port range; keep that on a VM, GKE, or another environment that can expose those ports
 
-## GitHub Actions Deploys
+## Direct GCP Deploys
 
-This repo now includes manually-triggered GitHub Actions workflows for:
+The repo now favors direct deploys from your own machine with `gcloud`, using your local service env files as the source of truth.
 
-- `Deploy OpenCom Core`
-- `Deploy OpenCom Node`
-- `Deploy OpenCom Media`
+Helper script:
 
-They build `backend/Dockerfile`, push to Artifact Registry, and deploy to Cloud Run with tunable scaling knobs like min/max instances and concurrency.
+- [scripts/deploy/gcp-deploy.sh](/home/don/development/OpenCom/scripts/deploy/gcp-deploy.sh)
 
-Recommended GitHub repository variables:
+What it does:
 
-- `GCP_PROJECT_ID`
-- `GCP_REGION`
-- `GCP_ARTIFACT_REGISTRY_REGION`
-- `GCP_ARTIFACT_REGISTRY_REPOSITORY`
-- `OPENCOM_CORE_SERVICE`
-- `OPENCOM_NODE_SERVICE`
-- `OPENCOM_MEDIA_SERVICE`
-- optional runtime overrides such as `OPENCOM_CORE_RUNTIME_SERVICE_ACCOUNT`, `OPENCOM_NODE_RUNTIME_SERVICE_ACCOUNT`, `OPENCOM_MEDIA_RUNTIME_SERVICE_ACCOUNT`
-- optional networking overrides such as `OPENCOM_CORE_CLOUDSQL_INSTANCES`, `OPENCOM_NODE_CLOUDSQL_INSTANCES`, `OPENCOM_MEDIA_CLOUDSQL_INSTANCES`
-- optional VPC connector vars such as `OPENCOM_CORE_VPC_CONNECTOR`, `OPENCOM_NODE_VPC_CONNECTOR`, `OPENCOM_MEDIA_VPC_CONNECTOR`
-
-Recommended GitHub repository secrets:
-
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`
-- `GCP_DEPLOY_SERVICE_ACCOUNT`
-- or `GCP_CREDENTIALS_JSON` if you prefer key-based auth instead of Workload Identity Federation
-- `OPENCOM_CORE_ENV`
-- `OPENCOM_NODE_ENV`
-- `OPENCOM_MEDIA_ENV`
+- builds the backend image for `core`, `node`, or `media`
+- pushes it to Artifact Registry
+- deploys it to Cloud Run
+- passes your local `core.env`, `node.env`, or `media.env` via `--env-vars-file`
 
 Cloudflare note:
 
-- these workflows deploy the services to GCP
-- Cloudflare should sit in front via DNS/proxy/custom domains after the services exist; it is not the thing triggering the backend deploy itself
+- deploy to GCP first
+- then point Cloudflare at the resulting public services or load balancer
+- Cloudflare is the front door, not the deployment engine
 
 ## Related docs
 

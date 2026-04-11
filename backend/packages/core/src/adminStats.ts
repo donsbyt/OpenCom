@@ -624,6 +624,7 @@ function inferDeploymentProvider() {
 
   const dbHost = String(env.DB_HOST || "").toLowerCase();
   const endpoint = String(env.S3_ENDPOINT || "").toLowerCase();
+  const gcsProject = String(env.GCS_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || "").toLowerCase();
   if (
     dbHost.includes("amazonaws.com") ||
     endpoint.includes("amazonaws.com") ||
@@ -632,6 +633,14 @@ function inferDeploymentProvider() {
   ) {
     return "AWS";
   }
+  if (
+    dbHost.includes("googleusercontent.com") ||
+    dbHost.includes("cloudsql") ||
+    env.STORAGE_PROVIDER === "gcs" ||
+    !!gcsProject
+  ) {
+    return "GCP";
+  }
 
   return "Self-hosted";
 }
@@ -639,12 +648,16 @@ function inferDeploymentProvider() {
 function classifyDatabaseProvider(host: string) {
   const normalizedHost = String(host || "").trim().toLowerCase();
   if (!normalizedHost) return "MySQL";
+  if (normalizedHost.includes("googleusercontent.com") || normalizedHost.includes("cloudsql")) {
+    return "Cloud SQL";
+  }
   if (normalizedHost.includes("rds.amazonaws.com")) return "Amazon RDS";
   if (normalizedHost.includes("amazonaws.com")) return "AWS-managed MySQL";
   return "MySQL";
 }
 
 function classifyStorageProvider() {
+  if (env.STORAGE_PROVIDER === "gcs") return "Google Cloud Storage";
   if (env.STORAGE_PROVIDER !== "s3") return "Local filesystem";
   if (String(env.S3_ENDPOINT || "").toLowerCase().includes("amazonaws.com")) {
     return "Amazon S3";
@@ -710,7 +723,7 @@ function buildInfrastructureSnapshot() {
     storage: {
       provider: storageProvider,
       mode: env.STORAGE_PROVIDER,
-      bucket: env.STORAGE_PROVIDER === "s3" ? env.CORE_S3_BUCKET || null : null,
+      bucket: env.STORAGE_PROVIDER === "local" ? null : env.CORE_STORAGE_BUCKET || env.CORE_S3_BUCKET || null,
       region: env.S3_REGION || region,
       endpoint: env.S3_ENDPOINT || null,
     },

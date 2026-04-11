@@ -119,9 +119,24 @@ const Env = z.object({
   CLIENT_UPLOAD_MAX_BYTES: z.coerce.number().int().min(1024).default(500 * 1024 * 1024),
   ATTACHMENT_TTL_DAYS: z.coerce.number().int().min(1).default(365),
   ATTACHMENT_STORAGE_DIR: z.string().default("./data/attachments"),
-  STORAGE_PROVIDER: z.enum(["local", "s3"]).default("local"),
+  STORAGE_PROVIDER: z.enum(["local", "s3", "gcs"]).default("local"),
+  CORE_STORAGE_BUCKET: z.preprocess(
+    (value) =>
+      value ??
+      process.env.CORE_GCS_BUCKET ??
+      process.env.CORE_S3_BUCKET ??
+      process.env.S3_BUCKET,
+    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  ),
   CORE_S3_BUCKET: z.preprocess(
     (value) => value ?? process.env.S3_BUCKET,
+    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  ),
+  GCS_PROJECT_ID: z.preprocess(
+    (value) =>
+      value ??
+      process.env.GOOGLE_CLOUD_PROJECT ??
+      process.env.GCLOUD_PROJECT,
     z.preprocess(emptyToUndefined, z.string().min(1).optional())
   ),
   S3_REGION: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
@@ -182,12 +197,16 @@ const Env = z.object({
 export const env = Env.parse(process.env);
 
 if (env.STORAGE_PROVIDER === "s3") {
-  if (!env.CORE_S3_BUCKET) {
-    throw new Error("CORE_S3_BUCKET (or S3_BUCKET) is required when STORAGE_PROVIDER=s3");
+  if (!(env.CORE_STORAGE_BUCKET || env.CORE_S3_BUCKET)) {
+    throw new Error("CORE_STORAGE_BUCKET/CORE_S3_BUCKET (or S3_BUCKET) is required when STORAGE_PROVIDER=s3");
   }
   if (!env.S3_REGION) {
     throw new Error("S3_REGION is required when STORAGE_PROVIDER=s3");
   }
+}
+
+if (env.STORAGE_PROVIDER === "gcs" && !env.CORE_STORAGE_BUCKET) {
+  throw new Error("CORE_STORAGE_BUCKET (or CORE_GCS_BUCKET) is required when STORAGE_PROVIDER=gcs");
 }
 
 function normalizeHttpBaseUrl(value: string | null | undefined): string {

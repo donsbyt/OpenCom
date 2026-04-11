@@ -58,7 +58,6 @@ type ClientRow = {
   file_size: number;
   checksum_sha256: string | null;
   release_notes: string | null;
-  download_url: string | null;
   created_at: string;
 };
 
@@ -170,7 +169,9 @@ function pickPreferredDesktopArtifact(platform = "", artifacts: ReturnType<typeo
 
 function serializeClientRow(row: ClientRow, origin = "") {
   const downloadPath = `/v1/client/builds/${encodeURIComponent(row.id)}/download`;
-  const downloadUrl = row.download_url || (origin ? `${origin}${downloadPath}` : downloadPath);
+  // Keep client build downloads behind the API proxy route rather than
+  // surfacing any storage-backed URL that may exist in older DB rows.
+  const downloadUrl = origin ? `${origin}${downloadPath}` : downloadPath;
 
   return {
     id:           row.id,
@@ -239,7 +240,7 @@ export async function downloadRoutes(app: FastifyInstance) {
 
     const rows = await q<ClientRow>(
       `SELECT id, type, version, channel, file_path, file_name, mime_type,
-              file_size, checksum_sha256, release_notes, download_url, created_at
+              file_size, checksum_sha256, release_notes, created_at
          FROM client
         WHERE type     = :platform
           AND channel  = :channel
@@ -285,8 +286,7 @@ export async function downloadRoutes(app: FastifyInstance) {
     // One row per platform, latest active build only
     const rows = await q<ClientRow>(
       `SELECT c.id, c.type, c.version, c.channel, c.file_path, c.file_name,
-              c.mime_type, c.file_size, c.checksum_sha256, c.release_notes,
-              c.download_url, c.created_at
+              c.mime_type, c.file_size, c.checksum_sha256, c.release_notes, c.created_at
          FROM client c
          INNER JOIN (
            SELECT type, MAX(created_at) AS latest_at
@@ -315,7 +315,7 @@ export async function downloadRoutes(app: FastifyInstance) {
 
     const rows = await q<ClientRow>(
       `SELECT id, type, version, channel, file_path, file_name, mime_type,
-              file_size, checksum_sha256, release_notes, download_url, created_at
+              file_size, checksum_sha256, release_notes, created_at
          FROM client
         WHERE id = :clientId
         LIMIT 1`,
