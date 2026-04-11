@@ -46,7 +46,8 @@ function loadMediaEnv() {
   ];
 
   for (const candidate of new Set(candidates)) {
-    if (!candidate || !fs.existsSync(candidate)) continue;
+    if (typeof candidate !== "string" || candidate.length === 0) continue;
+    if (!fs.existsSync(candidate)) continue;
     config({ path: candidate, override: true });
     return candidate;
   }
