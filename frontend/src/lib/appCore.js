@@ -3,6 +3,25 @@ import {
   VOICE_NOISE_SUPPRESSION_DEFAULT_PRESET,
   VOICE_NOISE_SUPPRESSION_PRESETS,
 } from "../voice/sfuClient";
+import {
+  ACCESS_TOKEN_KEY,
+  ACCESS_TOKEN_REFRESH_EVENT,
+  MEMBERSHIP_TOKEN_REFRESH_EVENT,
+  REFRESH_TOKEN_KEY,
+  clearStoredAuthSession,
+  dispatchAccessTokenRefresh,
+  dispatchMembershipTokenRefresh,
+  readStoredAuthSession,
+  runSingleFlightAccessTokenRefresh,
+  writeStoredAuthSession,
+} from "./authSession";
+
+export {
+  ACCESS_TOKEN_KEY,
+  ACCESS_TOKEN_REFRESH_EVENT,
+  MEMBERSHIP_TOKEN_REFRESH_EVENT,
+  REFRESH_TOKEN_KEY,
+} from "./authSession";
 
 export function resolveCoreApiBase() {
   const fromEnv = String(import.meta.env.VITE_CORE_API_URL || "").trim();
@@ -505,8 +524,6 @@ export const CLIENT_EXTENSIONS_DEV_MODE_KEY =
   "opencom_client_extensions_dev_mode";
 export const CLIENT_EXTENSIONS_DEV_URLS_KEY =
   "opencom_client_extensions_dev_urls";
-export const ACCESS_TOKEN_KEY = "opencom_access_token";
-export const REFRESH_TOKEN_KEY = "opencom_refresh_token";
 export const PENDING_INVITE_CODE_KEY = "opencom_pending_invite_code";
 export const PENDING_INVITE_AUTO_JOIN_KEY = "opencom_pending_invite_auto_join";
 export const MESSAGE_PAGE_SIZE = 50;
@@ -647,39 +664,42 @@ export function getMembershipTokenExpiryMs(membershipToken = "") {
 }
 
 export async function refreshAccessTokenWithRefreshToken() {
-  const refreshToken = localStorage.getItem(ACCESS_TOKEN_KEY) || "";
-  if (!refreshToken) return null;
-  const response = await fetch(`${CORE_API}/v1/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refreshToken }),
+  return runSingleFlightAccessTokenRefresh(async () => {
+    const currentSession = readStoredAuthSession();
+    const refreshToken = String(currentSession?.refreshToken || "").trim();
+    if (!refreshToken) return null;
+
+    const response = await fetch(`${CORE_API}/v1/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        clearStoredAuthSession();
+      }
+      return null;
+    }
+
+    const data = await response.json().catch(() => null);
+    const nextSession = writeStoredAuthSession({
+      accessToken: data?.accessToken,
+      refreshToken: data?.refreshToken || refreshToken,
+    });
+    if (!nextSession?.accessToken) {
+      clearStoredAuthSession();
+      return null;
+    }
+
+    dispatchAccessTokenRefresh(nextSession);
+    return nextSession;
   });
-  if (!response.ok) return null;
-  const data = await response.json().catch(() => null);
-  const accessToken = data?.accessToken;
-  if (!accessToken) return null;
-  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  if (data?.refreshToken)
-    localStorage.setItem(REFRESH_TOKEN_KEY, data.refreshToken);
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(
-      new CustomEvent("opencom-access-token-refresh", {
-        detail: {
-          accessToken,
-          refreshToken: data?.refreshToken || refreshToken,
-        },
-      }),
-    );
-  }
-  return {
-    accessToken,
-    refreshToken: data?.refreshToken || refreshToken,
-  };
 }
 
 export async function refreshMembershipTokenForNode(baseUrl, membershipToken) {
   if (!membershipToken) return null;
-  const accessToken = localStorage.getItem(ACCESS_TOKEN_KEY) || "";
+  const accessToken = readStoredAuthSession()?.accessToken || "";
   const serverId = getMembershipTokenServerId(membershipToken);
   if (!serverId) return null;
 
@@ -699,13 +719,7 @@ export async function refreshMembershipTokenForNode(baseUrl, membershipToken) {
     const nextToken = data?.membershipToken;
     if (!nextToken) return null;
 
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(
-        new CustomEvent("opencom-membership-token-refresh", {
-          detail: { serverId, membershipToken: nextToken },
-        }),
-      );
-    }
+    dispatchMembershipTokenRefresh({ serverId, membershipToken: nextToken });
     return nextToken;
   })();
 
@@ -1055,10 +1069,69 @@ export async function api(path, options = {}) {
     const errorData = await response.json().catch(() => ({}));
     const err = new Error(errorData.error || `HTTP_${response.status}`);
     err.status = response.status;
+    err.payload = errorData;
+    err.issues = Array.isArray(errorData.issues) ? errorData.issues : [];
     throw err;
   }
 
   return response.json();
+}
+
+function formatValidationPath(path = []) {
+  if (!Array.isArray(path) || !path.length) return "";
+  const cleaned = path.filter((part) => part !== "activity");
+  if (!cleaned.length) return "";
+  if (cleaned[0] === "buttons" && Number.isInteger(cleaned[1])) {
+    const buttonLabel = `Button ${Number(cleaned[1]) + 1}`;
+    if (cleaned[2] === "label") return `${buttonLabel} label`;
+    if (cleaned[2] === "url") return `${buttonLabel} URL`;
+    return buttonLabel;
+  }
+  return cleaned
+    .map((part) =>
+      String(part)
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .replace(/[_-]+/g, " ")
+        .trim(),
+    )
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatValidationIssue(issue, fallback = "Invalid value.") {
+  const label = formatValidationPath(issue?.path || []);
+  const message = String(issue?.message || fallback).trim() || fallback;
+  if (/invalid url/i.test(message)) {
+    if (label === "Large Image Url" || label === "Small Image Url") {
+      return `${label.replace("Url", "URL")} must use an uploaded image path or a valid http(s) URL.`;
+    }
+    if (/URL$/.test(label)) {
+      return `${label} must use a valid http(s) URL.`;
+    }
+  }
+  if (!label) return message;
+  if (
+    label === "Large Image Url" ||
+    label === "Small Image Url"
+  ) {
+    return `${label.replace("Url", "URL")}: ${message}`;
+  }
+  return `${label}: ${message}`;
+}
+
+export function describeValidationIssues(issues = [], fallback = "Invalid value.") {
+  if (!Array.isArray(issues) || !issues.length) return fallback;
+  return issues
+    .slice(0, 2)
+    .map((issue) => formatValidationIssue(issue, fallback))
+    .join(" ");
+}
+
+export function describeApiError(error, fallback = "Request failed.") {
+  if (Array.isArray(error?.issues) && error.issues.length) {
+    return describeValidationIssues(error.issues, fallback);
+  }
+  return String(error?.message || fallback);
 }
 
 export async function nodeApi(baseUrl, path, token, options = {}) {
@@ -1620,9 +1693,9 @@ export function rpcActivityFromForm(form) {
     name: form.name.trim() || undefined,
     details: form.details.trim() || undefined,
     state: form.state.trim() || undefined,
-    largeImageUrl: form.largeImageUrl.trim() || undefined,
+    largeImageUrl: normalizeImageUrlInput(form.largeImageUrl || "") || undefined,
     largeImageText: form.largeImageText.trim() || undefined,
-    smallImageUrl: form.smallImageUrl.trim() || undefined,
+    smallImageUrl: normalizeImageUrlInput(form.smallImageUrl || "") || undefined,
     smallImageText: form.smallImageText.trim() || undefined,
     buttons: buttons.length ? buttons : undefined,
   };
@@ -1647,10 +1720,15 @@ export function formatMessageDate(value) {
   });
 }
 
-export function playNotificationBeep(mute = false) {
-  if (mute) return;
+let activeNotificationSoundAudio = null;
+
+function playSyntheticNotificationBeep() {
   try {
-    const audioCtx = new window.AudioContext();
+    if (typeof window === "undefined") return;
+    const AudioContextCtor =
+      window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return;
+    const audioCtx = new AudioContextCtor();
     const osc1 = audioCtx.createOscillator();
     const osc2 = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
@@ -1671,6 +1749,47 @@ export function playNotificationBeep(mute = false) {
     osc1.onended = () => {
       osc2.onended = () => audioCtx.close();
     };
+  } catch {}
+}
+
+export function playNotificationBeep(input = false) {
+  const options =
+    input && typeof input === "object" ? input : { mute: !!input };
+  const mute = options?.mute === true;
+  const soundUrl = String(options?.soundUrl || "").trim();
+  if (mute) return;
+  if (!soundUrl) {
+    playSyntheticNotificationBeep();
+    return;
+  }
+  try {
+    if (typeof window === "undefined" || typeof Audio === "undefined") {
+      return;
+    }
+    if (activeNotificationSoundAudio) {
+      try {
+        activeNotificationSoundAudio.pause();
+        activeNotificationSoundAudio.currentTime = 0;
+      } catch {}
+    }
+    const audio = new Audio(soundUrl);
+    let settled = false;
+    const clearActiveAudio = () => {
+      if (settled) return;
+      settled = true;
+      if (activeNotificationSoundAudio === audio) {
+        activeNotificationSoundAudio = null;
+      }
+    };
+    activeNotificationSoundAudio = audio;
+    audio.preload = "auto";
+    audio.volume = 1;
+    audio.onended = clearActiveAudio;
+    audio.onerror = clearActiveAudio;
+    const playPromise = audio.play();
+    if (playPromise && typeof playPromise.catch === "function") {
+      playPromise.catch(clearActiveAudio);
+    }
   } catch {}
 }
 

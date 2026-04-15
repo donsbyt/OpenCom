@@ -1,0 +1,249 @@
+import { resolveCoreApiUrl } from "./config";
+import type { CoreServer } from "./types";
+
+const CORE_API = resolveCoreApiUrl().replace(/\/$/, "");
+const DEFAULT_WEB_APP_ORIGIN = "https://opencom.online";
+const BOOST_GIFT_CODE_RE = /^[a-zA-Z0-9_-]{8,96}$/;
+
+function toNormalizedBoolean(value: string | undefined): boolean {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+export function normalizeHttpBaseUrl(value = ""): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+export function isLoopbackHostname(hostname = ""): boolean {
+  const normalized = String(hostname || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  if (!normalized) return false;
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "0:0:0:0:0:0:0:1" ||
+    normalized === "0.0.0.0" ||
+    normalized.startsWith("127.")
+  );
+}
+
+export function gatewayUrlToHttpBaseUrl(value = ""): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "ws:") parsed.protocol = "http:";
+    else if (parsed.protocol === "wss:") parsed.protocol = "https:";
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    parsed.search = "";
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/gateway\/?$/i, "");
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+export function resolvePublicNodeBaseUrl(): string {
+  const explicit = normalizeHttpBaseUrl(
+    process.env.EXPO_PUBLIC_OPENCOM_PUBLIC_NODE_BASE_URL || "",
+  );
+  if (explicit) return explicit;
+
+  const wsCandidates = [
+    process.env.EXPO_PUBLIC_OPENCOM_NODE_GATEWAY_WS_URL,
+    process.env.EXPO_PUBLIC_OPENCOM_VOICE_GATEWAY_URL,
+  ];
+  for (const candidate of wsCandidates) {
+    const derived = gatewayUrlToHttpBaseUrl(candidate || "");
+    if (derived) return derived;
+  }
+  return "";
+}
+
+export const PUBLIC_NODE_BASE_URL = resolvePublicNodeBaseUrl();
+
+function shouldAllowLoopbackTargets(): boolean {
+  if (toNormalizedBoolean(process.env.EXPO_PUBLIC_OPENCOM_ALLOW_LOOPBACK_TARGETS)) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(CORE_API);
+    return isLoopbackHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeServerBaseUrl(baseUrl = ""): string {
+  const normalized = normalizeHttpBaseUrl(baseUrl);
+  if (!normalized) return "";
+
+  try {
+    const parsed = new URL(normalized);
+    if (isLoopbackHostname(parsed.hostname)) {
+      if (PUBLIC_NODE_BASE_URL) return PUBLIC_NODE_BASE_URL;
+      if (!shouldAllowLoopbackTargets()) return "";
+    }
+  } catch {
+    return normalized;
+  }
+
+  return normalized;
+}
+
+export function normalizeServerRecord(
+  server: CoreServer | null | undefined,
+): CoreServer | null {
+  if (!server) return null;
+  const normalizedBaseUrl = normalizeServerBaseUrl(server.baseUrl);
+  if (!normalizedBaseUrl || normalizedBaseUrl === server.baseUrl) return server;
+  return {
+    ...server,
+    baseUrl: normalizedBaseUrl,
+  };
+}
+
+export function normalizeServerList(list: CoreServer[]): CoreServer[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((server) => normalizeServerRecord(server))
+    .filter((server): server is CoreServer => !!server);
+}
+
+function cleanResolvableUrl(url?: string | null): string | null {
+  const trimmed = String(url || "").trim();
+  if (
+    !trimmed ||
+    trimmed === "null" ||
+    trimmed === "undefined" ||
+    trimmed === "[object Object]"
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+function isAllowedResolvedUrl(value = ""): boolean {
+  if (
+    value.startsWith("data:") ||
+    value.startsWith("file:") ||
+    value.startsWith("content:") ||
+    value.startsWith("blob:")
+  ) {
+    return true;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function resolveUrlAgainstBase(
+  url: string | null | undefined,
+  baseUrl: string | null | undefined,
+): string | null {
+  const cleanedUrl = cleanResolvableUrl(url);
+  if (!cleanedUrl) return null;
+
+  if (
+    cleanedUrl.startsWith("data:") ||
+    cleanedUrl.startsWith("file:") ||
+    cleanedUrl.startsWith("content:") ||
+    cleanedUrl.startsWith("blob:")
+  ) {
+    return cleanedUrl;
+  }
+
+  if (/^https?:\/\//i.test(cleanedUrl)) return cleanedUrl;
+
+  const normalizedBaseUrl = normalizeHttpBaseUrl(baseUrl || "");
+  if (!normalizedBaseUrl) return null;
+
+  try {
+    const resolved = new URL(
+      cleanedUrl,
+      cleanedUrl.startsWith("/")
+        ? normalizedBaseUrl
+        : `${normalizedBaseUrl.replace(/\/$/, "")}/`,
+    ).toString();
+    return isAllowedResolvedUrl(resolved) ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveCoreImageUrl(url: string | null | undefined): string | null {
+  const cleanedUrl = cleanResolvableUrl(url);
+  if (!cleanedUrl) return null;
+  if (cleanedUrl.startsWith("users/")) {
+    return `${CORE_API}/v1/profile-images/${cleanedUrl}`;
+  }
+  if (cleanedUrl.startsWith("/users/")) {
+    return `${CORE_API}/v1/profile-images${cleanedUrl}`;
+  }
+  return resolveUrlAgainstBase(cleanedUrl, CORE_API);
+}
+
+export function resolveCoreAttachmentUrl(
+  url: string | null | undefined,
+): string | null {
+  return resolveUrlAgainstBase(url, CORE_API);
+}
+
+export function resolveWebAppOrigin(): string {
+  const explicit = normalizeHttpBaseUrl(
+    process.env.EXPO_PUBLIC_OPENCOM_WEB_APP_URL || "",
+  );
+  return explicit || DEFAULT_WEB_APP_ORIGIN;
+}
+
+export function buildBoostGiftUrl(code: string): string {
+  const normalizedCode = String(code || "").trim();
+  return `${resolveWebAppOrigin()}/gift/${encodeURIComponent(normalizedCode)}`;
+}
+
+export function parseBoostGiftCodeFromInput(value = ""): string {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  if (BOOST_GIFT_CODE_RE.test(trimmed)) return trimmed;
+
+  const directPathMatch = trimmed.match(/^\/gift\/([a-zA-Z0-9_-]{8,96})\/?$/);
+  if (directPathMatch?.[1]) return directPathMatch[1];
+
+  try {
+    const parsed = new URL(trimmed);
+    const pathMatch = (parsed.pathname || "").match(
+      /^\/gift\/([a-zA-Z0-9_-]{8,96})\/?$/,
+    );
+    if (pathMatch?.[1]) return pathMatch[1];
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
+export function resolveServerAttachmentUrl(
+  url: string | null | undefined,
+  serverBaseUrl: string | null | undefined,
+): string | null {
+  return resolveUrlAgainstBase(url, normalizeServerBaseUrl(serverBaseUrl || ""));
+}

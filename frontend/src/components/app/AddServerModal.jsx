@@ -4,7 +4,7 @@ export function AddServerModal({
   addServerTab,
   setAddServerTab,
   canAccessServerAdminPanel,
-  resolveStaticPageHref,
+  onOpenServerAdmin,
   joinInviteCode,
   setJoinInviteCode,
   previewInvite,
@@ -17,6 +17,8 @@ export function AddServerModal({
   setNewServerBaseUrl,
   newServerLogoUrl,
   setNewServerLogoUrl,
+  newServerTeamSpeakBridge,
+  setNewServerTeamSpeakBridge,
   onImageFieldUpload,
   newServerBannerUrl,
   setNewServerBannerUrl,
@@ -65,15 +67,16 @@ export function AddServerModal({
                   Create yours
                 </button>
                 {canAccessServerAdminPanel && (
-                  <a
-                    href={resolveStaticPageHref("server-admin.html")}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
                     className="add-server-admin-link"
-                    onClick={(e) => e.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenServerAdmin && onOpenServerAdmin();
+                    }}
                   >
                     🔧 Admin
-                  </a>
+                  </button>
                 )}
               </div>
             </header>
@@ -195,12 +198,154 @@ export function AddServerModal({
                       style={{ width: "100%", marginTop: "0.35rem" }}
                     />
                   </label>
+                  <label
+                    style={{
+                      display: "flex",
+                      gap: "0.6rem",
+                      alignItems: "center",
+                      marginBottom: "0.75rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!newServerTeamSpeakBridge?.enabled}
+                      onChange={(event) =>
+                        setNewServerTeamSpeakBridge((current) => ({
+                          ...current,
+                          enabled: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Mirror a TeamSpeak server into this host</span>
+                  </label>
+                  {newServerTeamSpeakBridge?.enabled && (
+                    <>
+                      <p className="hint" style={{ marginBottom: "0.5rem" }}>
+                        This uses TeamSpeak ServerQuery from the OpenCom node.
+                        Make sure the node can reach the TeamSpeak query port.
+                      </p>
+                      <input
+                        placeholder="TeamSpeak host or IP"
+                        value={newServerTeamSpeakBridge?.host ?? ""}
+                        onChange={(e) =>
+                          setNewServerTeamSpeakBridge((current) => ({
+                            ...current,
+                            host: e.target.value,
+                          }))
+                        }
+                        style={{
+                          width: "100%",
+                          marginBottom: "0.5rem",
+                          padding: "0.5rem",
+                        }}
+                      />
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns:
+                            "repeat(auto-fit, minmax(160px, 1fr))",
+                          gap: "0.5rem",
+                          marginBottom: "0.5rem",
+                        }}
+                      >
+                        <input
+                          placeholder="Query port"
+                          value={newServerTeamSpeakBridge?.queryPort ?? "10011"}
+                          onChange={(e) =>
+                            setNewServerTeamSpeakBridge((current) => ({
+                              ...current,
+                              queryPort: e.target.value,
+                            }))
+                          }
+                          style={{ width: "100%", padding: "0.5rem" }}
+                        />
+                        <input
+                          placeholder="Server port"
+                          value={newServerTeamSpeakBridge?.serverPort ?? "9987"}
+                          onChange={(e) =>
+                            setNewServerTeamSpeakBridge((current) => ({
+                              ...current,
+                              serverPort: e.target.value,
+                            }))
+                          }
+                          style={{ width: "100%", padding: "0.5rem" }}
+                        />
+                        <input
+                          placeholder="Sync interval (sec)"
+                          value={
+                            newServerTeamSpeakBridge?.syncIntervalSec ?? "60"
+                          }
+                          onChange={(e) =>
+                            setNewServerTeamSpeakBridge((current) => ({
+                              ...current,
+                              syncIntervalSec: e.target.value,
+                            }))
+                          }
+                          style={{ width: "100%", padding: "0.5rem" }}
+                        />
+                      </div>
+                      <input
+                        placeholder="ServerQuery username"
+                        value={newServerTeamSpeakBridge?.username ?? ""}
+                        onChange={(e) =>
+                          setNewServerTeamSpeakBridge((current) => ({
+                            ...current,
+                            username: e.target.value,
+                          }))
+                        }
+                        style={{
+                          width: "100%",
+                          marginBottom: "0.5rem",
+                          padding: "0.5rem",
+                        }}
+                      />
+                      <input
+                        type="password"
+                        placeholder="ServerQuery password"
+                        value={newServerTeamSpeakBridge?.password ?? ""}
+                        onChange={(e) =>
+                          setNewServerTeamSpeakBridge((current) => ({
+                            ...current,
+                            password: e.target.value,
+                          }))
+                        }
+                        style={{
+                          width: "100%",
+                          marginBottom: "0.5rem",
+                          padding: "0.5rem",
+                        }}
+                      />
+                      <input
+                        placeholder="OpenCom category name"
+                        value={
+                          newServerTeamSpeakBridge?.categoryName ?? "teamspeak"
+                        }
+                        onChange={(e) =>
+                          setNewServerTeamSpeakBridge((current) => ({
+                            ...current,
+                            categoryName: e.target.value,
+                          }))
+                        }
+                        style={{
+                          width: "100%",
+                          marginBottom: "0.5rem",
+                          padding: "0.5rem",
+                        }}
+                      />
+                    </>
+                  )}
                   <button
                     onClick={createServer}
                     disabled={
                       !newServerName.trim() ||
                       !newServerBaseUrl.trim() ||
-                      !newServerLogoUrl.trim()
+                      !newServerLogoUrl.trim() ||
+                      !!(
+                        newServerTeamSpeakBridge?.enabled &&
+                        (!newServerTeamSpeakBridge?.host?.trim() ||
+                          !newServerTeamSpeakBridge?.username?.trim() ||
+                          !newServerTeamSpeakBridge?.password)
+                      )
                     }
                   >
                     Add Server

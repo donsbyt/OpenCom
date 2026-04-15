@@ -1,7 +1,8 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
+import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { z } from "zod";
 import { ulidLike } from "@ods/shared/ids.js";
-import { q } from "../db.js";
+import { pool, q } from "../db.js";
 import { hashPassword, verifyPassword, sha256Hex } from "../crypto.js";
 import crypto from "node:crypto";
 import { parseBody } from "../validation.js";
@@ -41,6 +42,13 @@ const ResetPassword = z.object({
 const ACCESS_TOKEN_TTL = "12h";
 const REFRESH_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000; // 1 year
 
+type RefreshTokenRow = RowDataPacket & {
+  id: string;
+  user_id: string;
+  revoked_at: string | null;
+  expires_at: string;
+};
+
 function randomToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -62,13 +70,11 @@ function normalizeIp(raw: string): string {
 }
 
 function getClientIp(request: FastifyRequest): string {
-  const cfIp = firstHeaderValue(request.headers["cf-connecting-ip"]);
-  if (cfIp) return normalizeIp(cfIp);
-
-  const forwardedFor = firstHeaderValue(request.headers["x-forwarded-for"]);
-  if (forwardedFor) return normalizeIp(forwardedFor.split(",")[0] || forwardedFor);
-
-  return normalizeIp(request.ip);
+  const forwardedIps = Array.isArray((request as any).ips) ? (request as any).ips : [];
+  const trustedIp = typeof forwardedIps[0] === "string" && forwardedIps[0].trim()
+    ? forwardedIps[0]
+    : request.ip;
+  return normalizeIp(trustedIp);
 }
 
 function getClientUserAgent(request: FastifyRequest): string | null {
@@ -222,16 +228,6 @@ export async function authRoutes(app: FastifyInstance) {
         await q(`DELETE FROM users WHERE id=:id`, { id });
         return rep.code(500).send({ error: mapMailError(error) });
       }
-    }
-
-    // Bootstrap platform founder on first registration if unset
-    await q(`INSERT INTO platform_config (id, founder_user_id) VALUES (1, NULL) ON DUPLICATE KEY UPDATE id=id`);
-    const founder = await q<{ founder_user_id: string | null }>(`SELECT founder_user_id FROM platform_config WHERE id=1`);
-    if (!founder.length || !founder[0].founder_user_id) {
-      await q(`UPDATE platform_config SET founder_user_id=:id WHERE id=1`, { id });
-      await q(`INSERT INTO platform_admins (user_id,added_by) VALUES (:id,:id) ON DUPLICATE KEY UPDATE user_id=user_id`, { id });
-      await q(`INSERT INTO user_badges (user_id,badge) VALUES (:id,'PLATFORM_FOUNDER') ON DUPLICATE KEY UPDATE user_id=user_id`, { id });
-      await q(`INSERT INTO user_badges (user_id,badge) VALUES (:id,'PLATFORM_ADMIN') ON DUPLICATE KEY UPDATE user_id=user_id`, { id });
     }
 
     try {
@@ -434,40 +430,77 @@ export async function authRoutes(app: FastifyInstance) {
   app.post("/v1/auth/refresh", async (req, rep) => {
     const body = parseBody(z.object({ refreshToken: z.string().min(10) }), req.body);
     const tokenHash = sha256Hex(body.refreshToken);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
 
-    const rows = await q<{ id: string; user_id: string; revoked_at: string | null; expires_at: string }>(
-      `SELECT id,user_id,revoked_at,expires_at FROM refresh_tokens WHERE token_hash=:tokenHash`,
-      { tokenHash }
-    );
-    if (!rows.length) return rep.code(401).send({ error: "INVALID_REFRESH" });
-
-    const rt = rows[0];
-    if (rt.revoked_at) return rep.code(401).send({ error: "REFRESH_REVOKED" });
-    if (new Date(rt.expires_at).getTime() < Date.now()) return rep.code(401).send({ error: "REFRESH_EXPIRED" });
-    if (await isAccountBanned(rt.user_id)) {
-      await q(
-        `UPDATE refresh_tokens SET revoked_at=NOW()
-         WHERE user_id=:userId AND revoked_at IS NULL`,
-        { userId: rt.user_id }
+      const [rows] = await connection.query<RefreshTokenRow[]>(
+        `SELECT id,user_id,revoked_at,expires_at
+         FROM refresh_tokens
+         WHERE token_hash=:tokenHash
+         LIMIT 1
+         FOR UPDATE`,
+        { tokenHash }
       );
-      return rep.code(403).send({ error: "ACCOUNT_BANNED" });
+      if (!rows.length) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "INVALID_REFRESH" });
+      }
+
+      const rt = rows[0];
+      if (rt.revoked_at) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "REFRESH_REVOKED" });
+      }
+      if (new Date(rt.expires_at).getTime() < Date.now()) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "REFRESH_EXPIRED" });
+      }
+      if (await isAccountBanned(rt.user_id)) {
+        await connection.query(
+          `UPDATE refresh_tokens
+           SET revoked_at=NOW()
+           WHERE user_id=:userId
+             AND revoked_at IS NULL`,
+          { userId: rt.user_id }
+        );
+        await connection.commit();
+        return rep.code(403).send({ error: "ACCOUNT_BANNED" });
+      }
+
+      const [revokeResult] = await connection.execute<ResultSetHeader>(
+        `UPDATE refresh_tokens
+         SET revoked_at=NOW()
+         WHERE id=:id
+           AND revoked_at IS NULL`,
+        { id: rt.id }
+      );
+      if (revokeResult.affectedRows !== 1) {
+        await connection.rollback();
+        return rep.code(401).send({ error: "REFRESH_REVOKED" });
+      }
+
+      const nextRefresh = randomToken();
+      const nextRefreshId = ulidLike();
+      const nextTokenHash = sha256Hex(nextRefresh);
+      const nextExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString().slice(0, 19).replace("T", " ");
+
+      await connection.query(
+        `INSERT INTO refresh_tokens (id,user_id,token_hash,expires_at)
+         VALUES (:id,:userId,:tokenHash,:expiresAt)`,
+        { id: nextRefreshId, userId: rt.user_id, tokenHash: nextTokenHash, expiresAt: nextExpiresAt }
+      );
+
+      await connection.commit();
+
+      const accessToken = app.jwt.sign({ sub: rt.user_id, typ: "access" }, { expiresIn: ACCESS_TOKEN_TTL });
+      return rep.send({ accessToken, refreshToken: nextRefresh });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
     }
-
-    const nextRefresh = randomToken();
-    const nextRefreshId = ulidLike();
-    const nextTokenHash = sha256Hex(nextRefresh);
-    const nextExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString().slice(0, 19).replace("T", " ");
-
-    await q(
-      `INSERT INTO refresh_tokens (id,user_id,token_hash,expires_at)
-       VALUES (:id,:userId,:tokenHash,:expiresAt)`,
-      { id: nextRefreshId, userId: rt.user_id, tokenHash: nextTokenHash, expiresAt: nextExpiresAt }
-    );
-    // Rotate refresh token on every refresh for better redundancy and session continuity.
-    await q(`UPDATE refresh_tokens SET revoked_at=NOW() WHERE id=:id`, { id: rt.id });
-
-    const accessToken = app.jwt.sign({ sub: rt.user_id, typ: "access" }, { expiresIn: ACCESS_TOKEN_TTL });
-    return rep.send({ accessToken, refreshToken: nextRefresh });
   });
 
   app.get("/v1/me", { preHandler: [app.authenticate] } as any, async (req: any) => {
@@ -541,6 +574,13 @@ export async function authRoutes(app: FastifyInstance) {
     await q(
       `UPDATE users SET password_hash=:newHash WHERE id=:userId`,
       { userId, newHash }
+    );
+    await q(
+      `UPDATE refresh_tokens
+       SET revoked_at=NOW()
+       WHERE user_id=:userId
+         AND revoked_at IS NULL`,
+      { userId }
     );
 
     return rep.send({ success: true });

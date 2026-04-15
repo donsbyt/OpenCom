@@ -8,12 +8,14 @@ import { env } from "./env.js";
 import { beginTrackedRequest, recordTrackedRequest } from "./adminStats.js";
 import fs from "node:fs";
 import path from "node:path";
+import { pool } from "./db.js";
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB for raw image uploads
 const MAX_MULTIPART_BYTES = Math.max(
   MAX_IMAGE_BYTES,
   env.ATTACHMENT_MAX_BYTES,
-  env.ATTACHMENT_BOOST_MAX_BYTES
+  env.ATTACHMENT_BOOST_MAX_BYTES,
+  env.CLIENT_UPLOAD_MAX_BYTES
 );
 
 export function buildHttp() {
@@ -59,6 +61,10 @@ export function buildHttp() {
   });
 
   app.setErrorHandler((error, req, rep) => {
+    const statusCode = Number((error as any)?.statusCode || 0);
+    if (statusCode === 413) {
+      return rep.code(413).send({ error: "TOO_LARGE", maxBytes: MAX_MULTIPART_BYTES });
+    }
     if (error instanceof ZodError) {
       return rep.code(400).send({ error: "VALIDATION_ERROR", issues: error.issues });
     }
@@ -73,7 +79,15 @@ export function buildHttp() {
   });
 
   // Note: refresh tokens use separate secret manually (not via plugin)
-  app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async (req, rep) => {
+    try {
+      await pool.query("SELECT 1");
+      return { status: "ok", db: "connected" };
+    } catch (error) {
+      req.log.error({ err: error }, "Health check DB query failed");
+      return rep.code(503).send({ status: "error", db: "disconnected" });
+    }
+  });
 
   return app;
 }

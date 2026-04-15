@@ -9,6 +9,7 @@ import {
 import { createApiClient } from "../api";
 import { resolveCoreApiUrl } from "../config";
 import { saveTokens, clearTokens } from "../storage";
+import { normalizeServerList } from "../urls";
 import type {
   AuthTokens,
   CoreServer,
@@ -64,6 +65,8 @@ export type AuthContextValue = {
   // DM threads (kept globally so screens can react to real-time updates)
   dmThreads: DmThreadApi[];
   setDmThreads: React.Dispatch<React.SetStateAction<DmThreadApi[]>>;
+  dmThreadsLoaded: boolean;
+  refreshDmThreads: (options?: { force?: boolean }) => Promise<DmThreadApi[]>;
   upsertDmMessage: (threadId: string, message: DmMessageApi) => void;
   removeDmMessage: (threadId: string, messageId: string) => void;
 
@@ -106,6 +109,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [dmMessages, setDmMessages] = useState<Record<string, DmMessageApi[]>>(
     {},
   );
+  const [dmThreadsLoaded, setDmThreadsLoaded] = useState(false);
+  const dmThreadsRequestRef = useRef<Promise<DmThreadApi[]> | null>(null);
 
   const setTokens = useCallback(async (next: AuthTokens | null) => {
     tokensRef.current = next;
@@ -121,7 +126,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setServers([]);
       setPresenceByUserId({});
       setDmThreads([]);
+      setDmThreadsLoaded(false);
       setDmMessages({});
+      dmThreadsRequestRef.current = null;
     }
   }, []);
 
@@ -154,7 +161,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })),
     ]);
     setMe({ id: meData.id, username: meData.username });
-    setServers(serversData.servers || []);
+    setServers(normalizeServerList(serversData.servers || []));
     const selfPresence = presenceData.presence?.[meData.id];
     if (selfPresence?.status) {
       const normalizedStatus = normalizeUserStatus(selfPresence.status);
@@ -242,6 +249,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const refreshDmThreads = useCallback(
+    async (options?: { force?: boolean }) => {
+      if (!options?.force && dmThreadsRequestRef.current) {
+        return dmThreadsRequestRef.current;
+      }
+
+      const request = api
+        .getDms()
+        .then((data) => {
+          const nextThreads = (data.dms ?? []) as DmThreadApi[];
+          setDmThreads(nextThreads);
+          setDmThreadsLoaded(true);
+          return nextThreads;
+        })
+        .finally(() => {
+          dmThreadsRequestRef.current = null;
+        });
+
+      dmThreadsRequestRef.current = request;
+      return request;
+    },
+    [api],
+  );
+
   const value = useMemo<AuthContextValue>(
     () => ({
       api,
@@ -264,6 +295,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       updatePresence,
       dmThreads,
       setDmThreads,
+      dmThreadsLoaded,
+      refreshDmThreads,
       upsertDmMessage,
       removeDmMessage,
       dmMessages,
@@ -284,6 +317,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       presenceByUserId,
       updatePresence,
       dmThreads,
+      dmThreadsLoaded,
+      refreshDmThreads,
       upsertDmMessage,
       removeDmMessage,
       dmMessages,

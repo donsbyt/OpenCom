@@ -1,5 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { q } from "../db.js";
+import { syncMediaDisconnectMember } from "../mediaSync.js";
 
 export async function meRoutes(app: FastifyInstance) {
   // Returns guilds the authed user has joined on THIS node tenant
@@ -46,6 +47,14 @@ export async function meRoutes(app: FastifyInstance) {
   app.post("/v1/me/voice-disconnect", { preHandler: [app.authenticate] } as any, async (req: any) => {
     const userId = req.auth.userId as string;
     const coreServerId = req.auth.coreServerId as string;
+    const existingVoiceStates = await q<{ guild_id: string; channel_id: string }>(
+      `SELECT vs.guild_id, vs.channel_id
+       FROM voice_states vs
+       JOIN guilds g ON g.id = vs.guild_id
+       WHERE vs.user_id = :userId
+         AND g.server_id = :coreServerId`,
+      { userId, coreServerId }
+    );
 
     await q(
       `DELETE vs FROM voice_states vs
@@ -53,6 +62,16 @@ export async function meRoutes(app: FastifyInstance) {
        WHERE vs.user_id = :userId
          AND g.server_id = :coreServerId`,
       { userId, coreServerId }
+    );
+
+    await Promise.all(
+      existingVoiceStates.map((state) =>
+        syncMediaDisconnectMember({
+          guildId: state.guild_id,
+          channelId: state.channel_id,
+          userId,
+        })
+      )
     );
 
     return { ok: true };

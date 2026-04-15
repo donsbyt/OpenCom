@@ -1,4 +1,6 @@
 import { FastifyInstance } from "fastify";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { z } from "zod";
 import { q } from "../db.js";
 import { env } from "../env.js";
@@ -27,6 +29,36 @@ function isPrivateHostname(hostname: string) {
   return false;
 }
 
+function isPrivateIpAddress(address: string) {
+  if (isIP(address) === 4) {
+    const ipv4 = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!ipv4) return false;
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    if (a === 10) return true;
+    if (a === 127) return true;
+    if (a === 0) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+
+  if (isIP(address) === 6) {
+    const normalized = address.toLowerCase();
+    return normalized === "::1"
+      || normalized.startsWith("fc")
+      || normalized.startsWith("fd")
+      || normalized.startsWith("fe8")
+      || normalized.startsWith("fe9")
+      || normalized.startsWith("fea")
+      || normalized.startsWith("feb");
+  }
+
+  return false;
+}
+
 function decodeHtmlEntities(input = "") {
   return input
     .replace(/&amp;/g, "&")
@@ -52,6 +84,60 @@ function normalizeUrl(raw: string) {
   const parsed = new URL(raw);
   parsed.hash = "";
   return parsed.toString();
+}
+
+async function assertPreviewTargetAllowed(target: URL, appBaseHost: string) {
+  if (target.username || target.password) {
+    throw new Error("URL_NOT_ALLOWED");
+  }
+
+  const targetHost = target.hostname.toLowerCase();
+  if (targetHost !== appBaseHost && isPrivateHostname(targetHost)) {
+    throw new Error("URL_NOT_ALLOWED");
+  }
+
+  if (targetHost === appBaseHost) return;
+
+  if (isIP(target.hostname) && isPrivateIpAddress(target.hostname)) {
+    throw new Error("URL_NOT_ALLOWED");
+  }
+
+  const resolved = await lookup(target.hostname, { all: true });
+  if (!resolved.length) {
+    throw new Error("URL_NOT_ALLOWED");
+  }
+  if (resolved.some((entry) => isPrivateIpAddress(entry.address))) {
+    throw new Error("URL_NOT_ALLOWED");
+  }
+}
+
+async function fetchPreviewResponse(target: URL, appBaseHost: string, signal: AbortSignal) {
+  let current = new URL(target.toString());
+
+  for (let redirectCount = 0; redirectCount < 5; redirectCount += 1) {
+    await assertPreviewTargetAllowed(current, appBaseHost);
+
+    const response = await fetch(current.toString(), {
+      method: "GET",
+      redirect: "manual",
+      signal,
+      headers: {
+        "User-Agent": "OpenComLinkPreview/1.0 (+https://opencom.online)",
+        Accept: "text/html,application/xhtml+xml"
+      }
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) return response;
+      current = new URL(location, current);
+      continue;
+    }
+
+    return response;
+  }
+
+  throw new Error("FETCH_FAILED");
 }
 
 function inviteCodeFromUrl(url: URL) {
@@ -83,8 +169,11 @@ export async function linkPreviewRoutes(app: FastifyInstance) {
         return "";
       }
     })();
-    const targetHost = target.hostname.toLowerCase();
-    if (isPrivateHostname(targetHost) && targetHost !== appBaseHost) return rep.code(403).send({ error: "URL_NOT_ALLOWED" });
+    try {
+      await assertPreviewTargetAllowed(target, appBaseHost);
+    } catch {
+      return rep.code(403).send({ error: "URL_NOT_ALLOWED" });
+    }
 
     const inviteCode = inviteCodeFromUrl(target);
     if (inviteCode) {
@@ -162,15 +251,7 @@ export async function linkPreviewRoutes(app: FastifyInstance) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4500);
     try {
-      const response = await fetch(target.toString(), {
-        method: "GET",
-        redirect: "follow",
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "OpenComLinkPreview/1.0 (+https://opencom.online)",
-          Accept: "text/html,application/xhtml+xml"
-        }
-      });
+      const response = await fetchPreviewResponse(target, appBaseHost, controller.signal);
       if (!response.ok) return rep.code(404).send({ error: "FETCH_FAILED" });
 
       const contentType = response.headers.get("content-type") || "";

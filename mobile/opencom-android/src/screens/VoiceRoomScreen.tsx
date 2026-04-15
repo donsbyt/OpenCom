@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -15,7 +15,7 @@ import {
 } from "../components/chrome";
 import { Avatar } from "../components/Avatar";
 import { useAuth } from "../context/AuthContext";
-import { httpToNodeGatewayWs, useNodeGateway } from "../hooks/useGateway";
+import { httpToNodeGatewayWs, useVoiceGateway } from "../hooks/useGateway";
 import type {
   Channel,
   CoreServer,
@@ -24,17 +24,28 @@ import type {
   VoiceState,
 } from "../types";
 import { colors, radii, spacing, typography } from "../theme";
+import { normalizeServerBaseUrl } from "../urls";
 
 type VoiceRoomScreenProps = {
   server?: CoreServer;
   guild: Guild;
   channel: Channel;
   mode?: "server" | "private";
+  mediaToken?: string | null;
+  mediaWsUrl?: string | null;
   membershipToken?: string | null;
   nodeBaseUrl?: string | null;
+  roomId?: string | null;
   callId?: string;
   participantName?: string | null;
   onBack: () => void;
+};
+
+type VoiceGatewaySession = {
+  wsUrl: string;
+  authToken: string;
+  authKind: "mediaToken" | "membershipToken";
+  transport: "dedicated-media" | "legacy-node";
 };
 
 function createRequestId(prefix: string) {
@@ -57,13 +68,45 @@ function upsertProducer(list: VoiceProducerInfo[], next: VoiceProducerInfo) {
   return updated;
 }
 
+function buildVoiceServer(
+  baseUrl: string,
+  membershipToken: string,
+  server?: CoreServer,
+  isPrivateCall = false,
+): CoreServer | null {
+  if (!baseUrl || !membershipToken) return null;
+  return {
+    id: server?.id || (isPrivateCall ? "private-call" : "voice-room"),
+    name: server?.name || (isPrivateCall ? "Private Call" : "Voice Room"),
+    baseUrl,
+    membershipToken,
+  };
+}
+
+function buildLegacyVoiceGatewaySession(
+  baseUrl: string,
+  membershipToken: string,
+): VoiceGatewaySession | null {
+  const wsUrl = httpToNodeGatewayWs(baseUrl);
+  if (!wsUrl || !membershipToken) return null;
+  return {
+    wsUrl,
+    authToken: membershipToken,
+    authKind: "membershipToken",
+    transport: "legacy-node",
+  };
+}
+
 export function VoiceRoomScreen({
   server,
   guild,
   channel,
   mode = "server",
+  mediaToken,
+  mediaWsUrl,
   membershipToken,
   nodeBaseUrl,
+  roomId,
   callId,
   participantName,
   onBack,
@@ -71,25 +114,55 @@ export function VoiceRoomScreen({
   const { api, me } = useAuth();
   const isPrivateCall = mode === "private" || !!callId;
   const resolvedBaseUrl = String(
-    nodeBaseUrl || server?.baseUrl || "",
+    normalizeServerBaseUrl(nodeBaseUrl || server?.baseUrl || "") ||
+      nodeBaseUrl ||
+      server?.baseUrl ||
+      "",
   ).trim();
   const resolvedMembershipToken = String(
     membershipToken || server?.membershipToken || "",
   ).trim();
-  const gatewayWsUrl = httpToNodeGatewayWs(resolvedBaseUrl);
-  const voiceServer: CoreServer | null = resolvedBaseUrl && resolvedMembershipToken
-    ? {
-        id: server?.id || "private-call",
-        name: server?.name || "Private Call",
-        baseUrl: resolvedBaseUrl,
-        membershipToken: resolvedMembershipToken,
-      }
-    : null;
+  const resolvedMediaToken = String(mediaToken || "").trim();
+  const resolvedMediaWsUrl = String(mediaWsUrl || "").trim();
+
+  const seededVoiceServer = useMemo(
+    () =>
+      buildVoiceServer(
+        resolvedBaseUrl,
+        resolvedMembershipToken,
+        server,
+        isPrivateCall,
+      ),
+    [isPrivateCall, resolvedBaseUrl, resolvedMembershipToken, server],
+  );
+  const seededDedicatedSession = useMemo<VoiceGatewaySession | null>(() => {
+    if (!resolvedMediaWsUrl || !resolvedMediaToken) return null;
+    return {
+      wsUrl: resolvedMediaWsUrl,
+      authToken: resolvedMediaToken,
+      authKind: "mediaToken",
+      transport: "dedicated-media",
+    };
+  }, [resolvedMediaToken, resolvedMediaWsUrl]);
+  const seededLegacySession = useMemo(
+    () =>
+      buildLegacyVoiceGatewaySession(
+        resolvedBaseUrl,
+        resolvedMembershipToken,
+      ),
+    [resolvedBaseUrl, resolvedMembershipToken],
+  );
 
   const [voiceStates, setVoiceStates] = useState<VoiceState[]>([]);
   const [producers, setProducers] = useState<VoiceProducerInfo[]>([]);
   const [status, setStatus] = useState("");
   const [loadingRoster, setLoadingRoster] = useState(true);
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [voiceServer, setVoiceServer] = useState<CoreServer | null>(
+    seededVoiceServer,
+  );
+  const [voiceGatewaySession, setVoiceGatewaySession] =
+    useState<VoiceGatewaySession | null>(seededDedicatedSession);
   const [joining, setJoining] = useState(false);
   const [ending, setEnding] = useState(false);
   const [keepConnected, setKeepConnected] = useState(true);
@@ -124,8 +197,10 @@ export function VoiceRoomScreen({
 
   const loadVoiceStates = useCallback(async () => {
     if (!voiceServer) {
-      setLoadingRoster(false);
-      setStatus("Voice gateway details are missing for this room.");
+      if (!sessionLoading) {
+        setLoadingRoster(false);
+        setStatus("Voice gateway details are missing for this room.");
+      }
       return;
     }
 
@@ -140,14 +215,18 @@ export function VoiceRoomScreen({
     } finally {
       setLoadingRoster(false);
     }
-  }, [api, channel.id, guild.id, voiceServer]);
+  }, [api, channel.id, guild.id, sessionLoading, voiceServer]);
 
-  const gateway = useNodeGateway({
-    wsUrl: gatewayWsUrl,
-    membershipToken: resolvedMembershipToken || null,
+  const gateway = useVoiceGateway({
+    wsUrl: voiceGatewaySession?.wsUrl || "",
+    authToken: voiceGatewaySession?.authToken || null,
+    authKind: voiceGatewaySession?.authKind || "mediaToken",
     guildId: guild.id,
     channelId: channel.id,
-    enabled: !!resolvedMembershipToken && !!gatewayWsUrl,
+    enabled:
+      !!voiceGatewaySession?.authToken &&
+      !!voiceGatewaySession?.wsUrl &&
+      !sessionLoading,
     onEvent: useCallback(
       (event) => {
         switch (event.type) {
@@ -256,8 +335,12 @@ export function VoiceRoomScreen({
 
   const joinVoiceRoom = useCallback(
     (reason: "auto" | "manual" = "manual") => {
-      if (!resolvedMembershipToken || !gatewayWsUrl) {
-        setStatus("Voice gateway details are missing for this room.");
+      if (!voiceGatewaySession?.authToken || !voiceGatewaySession?.wsUrl) {
+        setStatus(
+          sessionLoading
+            ? "Preparing the media session for this room..."
+            : "Voice gateway details are missing for this room.",
+        );
         return false;
       }
       if (joining) return false;
@@ -285,10 +368,10 @@ export function VoiceRoomScreen({
     [
       channel.id,
       gateway,
-      gatewayWsUrl,
       guild.id,
       joining,
-      resolvedMembershipToken,
+      sessionLoading,
+      voiceGatewaySession,
     ],
   );
 
@@ -325,11 +408,155 @@ export function VoiceRoomScreen({
   }, [api, callId, ending, onBack]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    setVoiceServer(seededVoiceServer);
+    setVoiceGatewaySession(seededDedicatedSession);
+    setSessionLoading(true);
+
+    const fallbackServer = seededVoiceServer;
+    const fallbackLegacySession = seededLegacySession;
+
+    async function resolveVoiceAccess() {
+      try {
+        if (seededDedicatedSession) {
+          return;
+        }
+
+        if (isPrivateCall) {
+          if (!callId) {
+            if (!seededDedicatedSession && !fallbackLegacySession) {
+              setStatus("Voice gateway details are missing for this room.");
+            }
+            return;
+          }
+
+          const joined = await api.joinPrivateCall(callId);
+          if (cancelled) return;
+
+          if (!joined?.success || !joined.guildId || !joined.channelId) {
+            if (fallbackLegacySession) {
+              setVoiceGatewaySession(fallbackLegacySession);
+            } else if (!seededDedicatedSession) {
+              setStatus("Could not resolve the media session for this call.");
+            }
+            return;
+          }
+
+          const nextBaseUrl = String(
+            normalizeServerBaseUrl(
+              joined.nodeBaseUrl || fallbackServer?.baseUrl || "",
+            ) ||
+              joined.nodeBaseUrl ||
+              fallbackServer?.baseUrl ||
+              "",
+          ).trim();
+          const nextMembershipToken = String(
+            joined.membershipToken || fallbackServer?.membershipToken || "",
+          ).trim();
+          const nextVoiceServer = buildVoiceServer(
+            nextBaseUrl,
+            nextMembershipToken,
+            server,
+            true,
+          );
+          if (nextVoiceServer) {
+            setVoiceServer(nextVoiceServer);
+          }
+
+          if (joined.mediaWsUrl && joined.mediaToken) {
+            setVoiceGatewaySession({
+              wsUrl: joined.mediaWsUrl,
+              authToken: joined.mediaToken,
+              authKind: "mediaToken",
+              transport: "dedicated-media",
+            });
+            return;
+          }
+
+          const nextLegacySession = buildLegacyVoiceGatewaySession(
+            nextBaseUrl,
+            nextMembershipToken,
+          );
+          if (nextLegacySession) {
+            setVoiceGatewaySession(nextLegacySession);
+          } else if (fallbackLegacySession) {
+            setVoiceGatewaySession(fallbackLegacySession);
+          } else if (!seededDedicatedSession) {
+            setStatus("Could not resolve the media session for this call.");
+          }
+          return;
+        }
+
+        if (!server) {
+          if (fallbackLegacySession) {
+            setVoiceGatewaySession(fallbackLegacySession);
+          } else if (!seededDedicatedSession) {
+            setStatus("Voice gateway details are missing for this room.");
+          }
+          return;
+        }
+
+        const mediaSession = await api.getVoiceMediaSession(server, channel.id);
+        if (cancelled) return;
+
+        if (mediaSession?.mediaWsUrl && mediaSession?.mediaToken) {
+          setVoiceGatewaySession({
+            wsUrl: mediaSession.mediaWsUrl,
+            authToken: mediaSession.mediaToken,
+            authKind: "mediaToken",
+            transport: "dedicated-media",
+          });
+          return;
+        }
+
+        if (fallbackLegacySession) {
+          setVoiceGatewaySession(fallbackLegacySession);
+        } else if (!seededDedicatedSession) {
+          setStatus("Could not resolve the media session for this room.");
+        }
+      } catch {
+        if (cancelled) return;
+        if (fallbackLegacySession) {
+          setVoiceGatewaySession((current) => current || fallbackLegacySession);
+        } else if (!seededDedicatedSession) {
+          setStatus(
+            isPrivateCall
+              ? "Could not resolve the media session for this call."
+              : "Could not resolve the media session for this room.",
+          );
+        }
+        setVoiceServer((current) => current || fallbackServer);
+      } finally {
+        if (!cancelled) {
+          setSessionLoading(false);
+        }
+      }
+    }
+
+    void resolveVoiceAccess();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    api,
+    callId,
+    channel.id,
+    isPrivateCall,
+    seededDedicatedSession,
+    seededLegacySession,
+    seededVoiceServer,
+    server,
+  ]);
+
+  useEffect(() => {
+    if (sessionLoading && !voiceServer) return;
     setLoadingRoster(true);
     setVoiceStates([]);
     setProducers([]);
-    loadVoiceStates();
-  }, [loadVoiceStates]);
+    void loadVoiceStates();
+  }, [loadVoiceStates, sessionLoading, voiceServer]);
 
   useEffect(() => {
     if (!gateway.ready || !keepConnected || joined || joining) return;
@@ -411,7 +638,9 @@ export function VoiceRoomScreen({
           <Text style={styles.heroTitle}>
             {joined
               ? "You are connected on mobile"
-              : gateway.ready
+              : sessionLoading
+                ? "Preparing the media connection"
+                : gateway.ready
                 ? "Ready to join this room"
                 : "Connecting to the voice gateway"}
           </Text>
@@ -493,7 +722,13 @@ export function VoiceRoomScreen({
             <View style={styles.connectionPill}>
               <Text style={styles.connectionLabel}>Gateway</Text>
               <Text style={styles.connectionValue}>
-                {gateway.connected ? "Connected" : "Offline"}
+                {sessionLoading
+                  ? "Preparing"
+                  : gateway.connected
+                    ? voiceGatewaySession?.transport === "dedicated-media"
+                      ? "Media service"
+                      : "Node fallback"
+                    : "Offline"}
               </Text>
             </View>
             <View style={styles.connectionPill}>

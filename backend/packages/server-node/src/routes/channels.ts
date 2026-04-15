@@ -7,6 +7,12 @@ import { requireManageChannels } from "../permissions/hierarchy.js";
 import { resolveChannelPermissions } from "../permissions/resolve.js";
 import { Perm, has } from "../permissions/bits.js";
 import { resolveCoreUserProfiles } from "../userDirectory.js";
+import { copyChannelOverwrites } from "../channelOverwrites.js";
+import {
+  syncMediaCloseRoom,
+  syncMediaDisconnectMember,
+  syncMediaVoiceMemberState,
+} from "../mediaSync.js";
 
 export async function channelRoutes(
   app: FastifyInstance,
@@ -147,7 +153,8 @@ export async function channelRoutes(
       name: z.string().min(1).max(64),
       type: z.enum(["text", "voice", "category"]).default("text"),
       parentId: z.string().min(3).nullable().optional(),
-      position: z.number().int().optional()
+      position: z.number().int().optional(),
+      syncPermissions: z.boolean().optional().default(true)
     }).parse(req.body);
 
     try {
@@ -195,6 +202,10 @@ export async function channelRoutes(
       { id, guildId, name: body.name, type: body.type, position: pos, parentId: body.parentId ?? null }
     );
 
+    if (body.parentId && body.syncPermissions) {
+      await copyChannelOverwrites(body.parentId, id);
+    }
+
     const channel = (await q<any>(
       `SELECT id,guild_id,name,type,position,parent_id,created_at FROM channels WHERE id=:id`,
       { id }
@@ -212,7 +223,8 @@ export async function channelRoutes(
     const body = z.object({
       name: z.string().min(1).max(64).optional(),
       parentId: z.string().min(3).nullable().optional(),
-      position: z.number().int().optional()
+      position: z.number().int().optional(),
+      syncPermissions: z.boolean().optional().default(false)
     }).parse(req.body);
 
     const ch = await q<{ guild_id: string }>(`SELECT guild_id FROM channels WHERE id=:channelId`, { channelId });
@@ -251,6 +263,10 @@ export async function channelRoutes(
       }
     );
 
+    if (body.parentId && body.syncPermissions) {
+      await copyChannelOverwrites(body.parentId, channelId);
+    }
+
     const channel = (await q<any>(
       `SELECT id,guild_id,name,type,position,parent_id,created_at FROM channels WHERE id=:channelId`,
       { channelId }
@@ -282,6 +298,9 @@ export async function channelRoutes(
     }
 
     await q(`DELETE FROM channels WHERE id=:channelId`, { channelId });
+    if (ch[0].type === "voice") {
+      await syncMediaCloseRoom({ guildId, channelId });
+    }
     broadcastGuild(guildId, "CHANNEL_DELETE", { channelId });
     return rep.send({ ok: true });
   });
@@ -326,6 +345,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, userId, channelId, false, false)
     );
+    await syncMediaVoiceMemberState({ guildId, userId });
     return rep.send({ ok: true });
   });
 
@@ -351,6 +371,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, userId, null, false, false)
     );
+    await syncMediaDisconnectMember({ guildId, channelId, userId });
     return rep.send({ ok: true });
   });
 
@@ -389,6 +410,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, userId, channelId, !!updated?.muted, !!updated?.deafened)
     );
+    await syncMediaVoiceMemberState({ guildId, userId });
     return rep.send({ ok: true });
   });
 
@@ -455,6 +477,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, memberId, channelId, !!updated?.muted, !!updated?.deafened)
     );
+    await syncMediaVoiceMemberState({ guildId, userId: memberId });
     return rep.send({ ok: true, userId: memberId, channelId, muted: !!updated?.muted, deafened: !!updated?.deafened });
   });
 
@@ -501,6 +524,7 @@ export async function channelRoutes(
       "VOICE_STATE_UPDATE",
       await buildVoiceStatePayload(guildId, memberId, null, false, false)
     );
+    await syncMediaDisconnectMember({ guildId, channelId, userId: memberId });
     return rep.send({ ok: true, userId: memberId, channelId });
   });
 }

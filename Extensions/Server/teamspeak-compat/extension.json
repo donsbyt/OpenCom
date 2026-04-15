@@ -2,7 +2,7 @@
   "id": "teamspeak-compat",
   "name": "TeamSpeak Compatibility Layer",
   "author": "OpenCom Team",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Official compatibility layer for running TeamSpeak-style extension packs in OpenCom.",
   "scope": "server",
   "entry": "index.js",
@@ -18,6 +18,25 @@
       "baseUrl": "",
       "authToken": "",
       "timeoutMs": 8000
+    },
+    "directBridge": {
+      "enabled": false,
+      "host": "",
+      "queryPort": 10011,
+      "serverPort": 9987,
+      "serverId": "",
+      "username": "",
+      "password": "",
+      "categoryName": "teamspeak",
+      "syncIntervalSec": 60,
+      "syncState": {
+        "categoryChannelId": "",
+        "channelBindings": [],
+        "lastSyncedAt": "",
+        "lastServerName": "",
+        "lastError": "",
+        "mirroredChannelCount": 0
+      }
     }
   }
 }

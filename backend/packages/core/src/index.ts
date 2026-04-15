@@ -1,12 +1,6 @@
-import { config } from "dotenv";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-config({ path: path.resolve(__dirname, "../../../.env") });
-
 import { buildHttp } from "./http.js";
 import { authRoutes } from "./routes/auth.js";
+import { panelAuthRoutes } from "./routes/panelAuth.js";
 import { deviceRoutes } from "./routes/devices.js";
 import { dmRoutes } from "./routes/dms.js";
 import { socialRoutes } from "./routes/social.js";
@@ -28,60 +22,152 @@ import { blogRoutes } from "./routes/blogs.js";
 import { FavouriteGifRoutes } from "./routes/FavouriteGifs.js";
 import { klipyRoutes } from "./routes/klipy.js";
 import { emoteRoutes } from "./routes/emotes.js";
-import { env } from "./env.js";
-import { makeRedis } from "./redis.js";
+import { supportRoutes } from "./routes/support.js";
+import { OauthIntergrationRoutes } from "./routes/OauthIntergration.js";
+import { coreEnvFilePath, env } from "./env.js";
+import { makeLocalRedis, makeRedis, RedisLike } from "./redis.js";
 import { presenceUpsert } from "./presence.js";
 import { CallRoutes } from "./routes/PrivateCalls.js";
+import { PresenceUpdate } from "@ods/shared/events.js";
+import { pool } from "./db.js";
+import { resolveSmtpConfig } from "./smtp.js";
+
 const app = buildHttp();
+let redis: RedisLike | null = null;
+let isShuttingDown = false;
 
-const missingPrivateCallConfig = [
-  ["OFFICIAL_NODE_BASE_URL", env.OFFICIAL_NODE_BASE_URL],
-  ["OFFICIAL_NODE_SERVER_ID", env.OFFICIAL_NODE_SERVER_ID],
-  ["PRIVATE_CALLS_GUILD_ID", env.PRIVATE_CALLS_GUILD_ID],
-  ["CORE_NODE_SYNC_SECRET", env.CORE_NODE_SYNC_SECRET],
-].filter(([, value]) => !value).map(([key]) => key);
+async function shutdown(reason: string, requestedExitCode = 0) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
 
-if (missingPrivateCallConfig.length) {
-  app.log.warn(
-    {
-      missing: missingPrivateCallConfig,
-      setupScript: "node scripts/create-private-calls-guild.mjs",
-    },
-    "Private-call voice provisioning is disabled until the official-node configuration is completed",
-  );
+  let exitCode = requestedExitCode;
+  app.log.info({ reason }, "Shutting down core server");
+
+  try {
+    await app.close();
+  } catch (error) {
+    exitCode = 1;
+    app.log.error({ err: error }, "Failed to close Fastify server");
+  }
+
+  try {
+    await pool.end();
+  } catch (error) {
+    exitCode = 1;
+    app.log.error({ err: error }, "Failed to close MySQL pool");
+  }
+
+  if (redis) {
+    try {
+      await redis.stop();
+    } catch (error) {
+      exitCode = 1;
+      app.log.error({ err: error }, "Failed to close Redis clients");
+    }
+  }
+
+  process.exit(exitCode);
 }
 
-// attach helper to app
-(app as any).pgPresenceUpsert = presenceUpsert;
+process.once("SIGINT", () => {
+  void shutdown("SIGINT");
+});
 
-// Redis is required for cross-instance gateway fanout and presence signaling.
-const redis = await makeRedis(env.REDIS_URL);
-await redis.start();
+process.once("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
 
-const gw = attachCoreGateway(app, redis);
+async function start() {
+  console.info("[core:storage] configuration", {
+    envFile: coreEnvFilePath,
+    provider: env.STORAGE_PROVIDER,
+    bucket: env.CORE_S3_BUCKET ?? null,
+    region: env.S3_REGION ?? null,
+  });
+  try {
+    const smtp = resolveSmtpConfig();
+    console.info("[core:smtp] configuration", {
+      envFile: coreEnvFilePath,
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure,
+      from: smtp.from,
+      debugLogging: ["1", "true", "yes", "on"].includes(String(process.env.SMTP_DEBUG_LOGGING || "").trim().toLowerCase()),
+      debugVerifyBeforeSend: ["1", "true", "yes", "on"].includes(String(process.env.SMTP_DEBUG_VERIFY_BEFORE_SEND || "").trim().toLowerCase())
+    });
+  } catch (error) {
+    console.warn("[core:smtp] not configured", {
+      envFile: coreEnvFilePath,
+      error: String((error as Error)?.message || error)
+    });
+  }
 
-await authRoutes(app);
-await deviceRoutes(app);
-await serverRoutes(app);
-await jwksRoutes(app);
-await profileRoutes(app);
-await inviteRoutes(app);
-await presenceRoutes(app);
-await adminRoutes(app, gw.broadcastToUser);
-await blogRoutes(app);
-await dmRoutes(app, gw.broadcastDM);
-await socialRoutes(app, gw.broadcastCallSignal, gw.broadcastToUser);
-await nodeSyncRoutes(app);
-await extensionRoutes(app);
-await billingRoutes(app);
-await linkPreviewRoutes(app);
-await downloadRoutes(app);
-await pushRoutes(app);
-await themeRoutes(app);
-await emoteRoutes(app);
-await klipyRoutes(app);
-await CallRoutes(app, gw.broadcastToUser);
-await FavouriteGifRoutes(app);
+  const missingPrivateCallConfig = [
+    ["OFFICIAL_NODE_BASE_URL", env.OFFICIAL_NODE_BASE_URL],
+    ["OFFICIAL_NODE_SERVER_ID", env.OFFICIAL_NODE_SERVER_ID],
+    ["PRIVATE_CALLS_GUILD_ID", env.PRIVATE_CALLS_GUILD_ID],
+    ["CORE_NODE_SYNC_SECRET", env.CORE_NODE_SYNC_SECRET],
+  ].filter(([, value]) => !value).map(([key]) => key);
 
+  if (missingPrivateCallConfig.length) {
+    app.log.warn(
+      {
+        missing: missingPrivateCallConfig,
+        setupScript: "node scripts/create-private-calls-guild.mjs",
+      },
+      "Private-call voice provisioning is disabled until the official-node configuration is completed",
+    );
+  }
 
-app.listen({ port: env.CORE_PORT, host: env.CORE_HOST });
+  // attach helper to app
+  (app as any).pgPresenceUpsert = presenceUpsert;
+
+  if (env.REDIS_DISABLED) {
+    app.log.warn("Redis disabled; running with in-memory gateway fanout only");
+    redis = makeLocalRedis();
+  } else {
+    // Redis is required for cross-instance gateway fanout and presence signaling.
+    redis = await makeRedis(env.REDIS_URL!);
+    await redis.start();
+  }
+
+  const gw = attachCoreGateway(app, redis);
+
+  await authRoutes(app);
+  await panelAuthRoutes(app);
+  await deviceRoutes(app);
+  await serverRoutes(app);
+  await jwksRoutes(app);
+  await profileRoutes(app);
+  await inviteRoutes(app);
+  await presenceRoutes(app, async (userId: string, presence: PresenceUpdate) => {
+    await redis!.pub.publish(
+      "core:presence",
+      JSON.stringify({ userId, presence }),
+    );
+  });
+  await adminRoutes(app, gw.broadcastToUser);
+  await supportRoutes(app);
+  await blogRoutes(app);
+  await dmRoutes(app, gw.broadcastDM);
+  await socialRoutes(app, gw.broadcastCallSignal, gw.broadcastToUser);
+  await nodeSyncRoutes(app);
+  await extensionRoutes(app);
+  await billingRoutes(app);
+  await linkPreviewRoutes(app);
+  await downloadRoutes(app);
+  await pushRoutes(app);
+  await themeRoutes(app);
+  await emoteRoutes(app);
+  await klipyRoutes(app);
+  await CallRoutes(app, gw.broadcastToUser);
+  await FavouriteGifRoutes(app);
+  await OauthIntergrationRoutes(app);
+
+  await app.listen({ port: env.CORE_PORT, host: env.CORE_HOST });
+}
+
+start().catch((error) => {
+  app.log.error({ err: error }, "Core server failed to start");
+  void shutdown("STARTUP_FAILURE", 1);
+});

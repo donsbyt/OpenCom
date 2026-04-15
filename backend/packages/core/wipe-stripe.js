@@ -1,25 +1,43 @@
 #!/usr/bin/env node
 
 import path from "path";
+import fs from "fs";
 import mysql from "mysql2/promise";
 import dotenv from "dotenv";
 
-// You will run this from: backend/packages/core
-// This resolves to: backend/.env
-dotenv.config({
-  path: path.resolve(process.cwd(), "../../.env"),
-});
+const envCandidates = [
+  process.env.CORE_ENV_FILE,
+  path.resolve(process.cwd(), "../../core.env"),
+  path.resolve(process.cwd(), "../../.env.core"),
+  path.resolve(process.cwd(), "../../.env"),
+];
 
-const dbUrl = process.env.CORE_DATABASE_URL || process.env.DATABASE_URL;
+for (const candidate of envCandidates) {
+  if (!candidate || !fs.existsSync(candidate)) continue;
+  dotenv.config({ path: candidate, override: true });
+  break;
+}
 
-if (!dbUrl) {
-  console.error("❌ No CORE_DATABASE_URL or DATABASE_URL found in backend/.env");
+const dbConfig = {
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD ?? "",
+  database: process.env.DB_NAME,
+};
+
+const missingDbVars = Object.entries(dbConfig)
+  .filter(([_, value]) => value === undefined || value === "")
+  .map(([key]) => key.toUpperCase());
+
+if (missingDbVars.length) {
+  console.error(`❌ Missing required DB variables in core.env/.env.core: ${missingDbVars.join(", ")}`);
   process.exit(1);
 }
 
 (async () => {
   try {
-    const connection = await mysql.createConnection(dbUrl);
+    const connection = await mysql.createConnection(dbConfig);
 
     console.log("Connected. Wiping Stripe subscription data...");
 

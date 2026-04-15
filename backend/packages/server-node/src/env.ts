@@ -1,5 +1,13 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { config } from "dotenv";
 import { isIP } from "node:net";
 import { z } from "zod";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const isCloudRun = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB || process.env.CLOUD_RUN_EXECUTION);
+export const nodeEnvFilePath = loadNodeEnv();
 
 const emptyToUndefined = (value: unknown) => {
   if (typeof value !== "string") return value;
@@ -17,9 +25,40 @@ const boolFlag = z.preprocess(
   z.boolean()
 );
 
+function loadNodeEnv() {
+  const candidates = [
+    process.env.NODE_ENV_FILE,
+    path.resolve(process.cwd(), "node.env"),
+    path.resolve(process.cwd(), ".env.node"),
+    path.resolve(process.cwd(), ".env"),
+    path.resolve(__dirname, "../../../node.env"),
+    path.resolve(__dirname, "../../../.env.node"),
+    path.resolve(__dirname, "../../../.env"),
+    path.resolve(__dirname, "../../../../../node.env"),
+    path.resolve(__dirname, "../../../../../.env.node"),
+    path.resolve(__dirname, "../../../../../.env"),
+    path.resolve(__dirname, "../node.env"),
+    path.resolve(__dirname, "../../node.env"),
+    path.resolve(__dirname, "../.env"),
+    path.resolve(__dirname, "../../.env"),
+  ];
+
+  for (const candidate of new Set(candidates)) {
+    if (typeof candidate !== "string" || candidate.length === 0) continue;
+    if (!fs.existsSync(candidate)) continue;
+    config({ path: candidate, override: true });
+    return candidate;
+  }
+
+  return null;
+}
+
 const Env = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  NODE_PORT: z.coerce.number().default(3002),
+  NODE_PORT: z.preprocess(
+    (value) => value ?? process.env.PORT,
+    z.coerce.number().default(3002)
+  ),
   NODE_HOST: z.string().default("0.0.0.0"),
   NODE_DATABASE_URL: z.string().min(1),
   NODE_ID: z.string().min(1),
@@ -32,8 +71,51 @@ const Env = z.object({
   ATTACHMENT_BOOST_MAX_BYTES: z.coerce.number().default(104857600),
   ATTACHMENT_TTL_DAYS: z.coerce.number().default(365),
   ATTACHMENT_STORAGE_DIR: z.string().default("./data/attachments"),
+  STORAGE_PROVIDER: z.enum(["local", "s3", "gcs"]).default("local"),
+  NODE_STORAGE_BUCKET: z.preprocess(
+    (value) =>
+      value ??
+      process.env.NODE_GCS_BUCKET ??
+      process.env.NODE_S3_BUCKET ??
+      process.env.S3_BUCKET,
+    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  ),
+  NODE_S3_BUCKET: z.preprocess(
+    (value) => value ?? process.env.S3_BUCKET,
+    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  ),
+  GCS_PROJECT_ID: z.preprocess(
+    (value) =>
+      value ??
+      process.env.GOOGLE_CLOUD_PROJECT ??
+      process.env.GCLOUD_PROJECT,
+    z.preprocess(emptyToUndefined, z.string().min(1).optional())
+  ),
+  S3_REGION: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  S3_ENDPOINT: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  S3_ACCESS_KEY_ID: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  S3_SECRET_ACCESS_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  S3_FORCE_PATH_STYLE: boolFlag.default(false),
+  S3_KEY_PREFIX: z.preprocess(emptyToUndefined, z.string().optional()),
   PUBLIC_BASE_URL: z.string().url(),
   NODE_SERVER_ID: z.string().min(1),
+  MEDIA_SERVER_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  MEDIA_WS_URL: z.preprocess(emptyToUndefined, z.string().optional()),
+  MEDIA_TOKEN_SECRET: z.preprocess(emptyToUndefined, z.string().min(16).optional()),
+  MEDIA_TOKEN_ISSUER: z.string().default("opencom-media"),
+  MEDIA_TOKEN_AUDIENCE: z.preprocess(emptyToUndefined, z.string().optional()),
+  MEDIA_TOKEN_TTL_SECONDS: z.coerce.number().default(300),
+  MEDIA_SYNC_SECRET: z.preprocess(
+    (value) => value ?? process.env.NODE_SYNC_SECRET,
+    z.preprocess(emptyToUndefined, z.string().min(16).optional())
+  ),
+  VOICE_STUN_URLS: z.preprocess(
+    emptyToUndefined,
+    z.string().default("stun:stun.l.google.com:19302")
+  ),
+  VOICE_TURN_URLS: z.preprocess(emptyToUndefined, z.string().optional()),
+  VOICE_TURN_SECRET: z.preprocess(emptyToUndefined, z.string().min(16).optional()),
+  VOICE_TURN_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
 
   MEDIASOUP_LISTEN_IP: z.string().default("0.0.0.0"),
   MEDIASOUP_ANNOUNCED_ADDRESS: z.preprocess(emptyToUndefined, z.string().optional()),
@@ -46,12 +128,28 @@ const Env = z.object({
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("warn"),
   LOG_DIR: z.string().default("./logs"),
-  LOG_TO_FILE: boolFlag.default(true),
+  LOG_TO_FILE: z.preprocess(
+    (value) => value ?? (isCloudRun ? "0" : undefined),
+    boolFlag.default(true)
+  ),
   DEBUG_HTTP: boolFlag.default(false),
   DEBUG_VOICE: boolFlag.default(false)
 });
 
 export const env = Env.parse(process.env);
+
+if (env.STORAGE_PROVIDER === "s3") {
+  if (!(env.NODE_STORAGE_BUCKET || env.NODE_S3_BUCKET)) {
+    throw new Error("NODE_STORAGE_BUCKET/NODE_S3_BUCKET (or S3_BUCKET) is required when STORAGE_PROVIDER=s3");
+  }
+  if (!env.S3_REGION) {
+    throw new Error("S3_REGION is required when STORAGE_PROVIDER=s3");
+  }
+}
+
+if (env.STORAGE_PROVIDER === "gcs" && !env.NODE_STORAGE_BUCKET) {
+  throw new Error("NODE_STORAGE_BUCKET (or NODE_GCS_BUCKET) is required when STORAGE_PROVIDER=gcs");
+}
 
 if (env.MEDIASOUP_RTC_MIN_PORT > env.MEDIASOUP_RTC_MAX_PORT) {
   throw new Error(`INVALID_MEDIASOUP_PORT_RANGE:${env.MEDIASOUP_RTC_MIN_PORT}>${env.MEDIASOUP_RTC_MAX_PORT}`);
@@ -63,6 +161,37 @@ if (!env.MEDIASOUP_ENABLE_UDP && !env.MEDIASOUP_ENABLE_TCP) {
 
 function stripAddressBrackets(value: string) {
   return String(value || "").trim().replace(/^\[(.*)\]$/, "$1");
+}
+
+function normalizeHttpBaseUrl(value: string | null | undefined): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeWsUrl(value: string | null | undefined): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "http:") parsed.protocol = "ws:";
+    if (parsed.protocol === "https:") parsed.protocol = "wss:";
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") return "";
+    parsed.pathname = "/gateway";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
 }
 
 function isLoopbackHostname(hostname: string) {
@@ -169,6 +298,16 @@ export const resolvedMediasoupAnnouncedAddressKind = classifyMediasoupAnnouncedA
   resolvedMediasoupAnnouncedAddress,
 );
 export const resolvedMediasoupAnnouncedIp = resolvedMediasoupAnnouncedAddress;
+export const configuredMediaServerUrl = normalizeHttpBaseUrl(env.MEDIA_SERVER_URL);
+export const resolvedMediaServerUrl = normalizeHttpBaseUrl(
+  env.MEDIA_SERVER_URL || env.PUBLIC_BASE_URL,
+);
+export const configuredMediaWsUrl = normalizeWsUrl(
+  env.MEDIA_WS_URL || env.MEDIA_SERVER_URL,
+);
+export const resolvedMediaWsUrl = normalizeWsUrl(
+  env.MEDIA_WS_URL || env.MEDIA_SERVER_URL || env.PUBLIC_BASE_URL,
+);
 
 export type MediasoupNetworkingWarning = {
   code: string;

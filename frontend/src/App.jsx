@@ -46,7 +46,14 @@ import { SecuritySettingsSection } from "./components/settings/SecuritySettingsS
 import { SafeAvatar } from "./components/ui/SafeAvatar";
 import { HeadphonesIcon, MicrophoneIcon } from "./components/ui/VoiceIcons";
 import { ThemeStudioApp } from "./theme/ThemeStudioApp.jsx";
-import { DOWNLOAD_TARGETS, getPreferredDownloadTarget } from "./lib/downloads";
+import { ServerAdminApp } from "./admin/ServerAdminApp.jsx";
+import {
+  DOWNLOAD_TARGETS,
+  fetchDownloadTargets,
+  getDeviceDownloadContext,
+  getMobileDownloadTarget,
+  getPreferredDownloadTarget,
+} from "./lib/downloads";
 import {
   BUILTIN_EMOTES,
   BUILTIN_EMOTE_CATEGORIES,
@@ -128,6 +135,7 @@ import {
   formatMessageTime,
   getContextMenuPoint,
   getCoreGatewayWsCandidates,
+  getDefaultCoreGatewayWsUrl,
   getDesktopBridge,
   getEmoteQuery,
   getInitials,
@@ -161,6 +169,7 @@ import {
   playNotificationBeep,
   prioritizeLastSuccessfulGateway,
   profileImageUrl,
+  describeApiError,
   rpcActivityFromForm,
   rpcFormFromActivity,
   resolveSlashCommand,
@@ -172,7 +181,9 @@ import {
   toTimestampMs,
   useThemeCss,
 } from "./lib/appCore";
-import { AdminApp } from "./admin/AdminApp.jsx";
+
+const PANEL_APP_URL =
+  import.meta.env.VITE_PANEL_APP_URL || "http://localhost:5175";
 
 const BUILTIN_REACTION_ENTRY_BY_TOKEN = BUILTIN_EMOTE_ENTRIES.reduce(
   (map, entry) => {
@@ -209,7 +220,12 @@ function mergeKlipyMediaItems(current = [], incoming = []) {
   const merged = [];
   const seen = new Set();
   for (const item of [...current, ...incoming]) {
-    const key = String(item?.id || item?.sourceUrl || "").trim();
+    const itemType =
+      String(item?.type || "").trim().toLowerCase() === "ad" ? "ad" : "media";
+    const baseKey = String(
+      item?.id || item?.sourceUrl || item?.iframeUrl || item?.pageUrl || "",
+    ).trim();
+    const key = baseKey ? `${itemType}:${baseKey}` : "";
     if (!key || seen.has(key)) continue;
     seen.add(key);
     merged.push(item);
@@ -290,6 +306,7 @@ export function App() {
     bio: "",
     pfpUrl: "",
     bannerUrl: "",
+    notificationSoundUrl: "",
   });
   const [fullProfileDraft, setFullProfileDraft] = useState(
     createBasicFullProfile({}),
@@ -332,6 +349,16 @@ export function App() {
   const [newServerBaseUrl, setNewServerBaseUrl] = useState("https://");
   const [newServerLogoUrl, setNewServerLogoUrl] = useState("");
   const [newServerBannerUrl, setNewServerBannerUrl] = useState("");
+  const [newServerTeamSpeakBridge, setNewServerTeamSpeakBridge] = useState({
+    enabled: false,
+    host: "",
+    queryPort: "10011",
+    serverPort: "9987",
+    username: "",
+    password: "",
+    categoryName: "teamspeak",
+    syncIntervalSec: "60",
+  });
   const [inviteServerId, setInviteServerId] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [inviteJoinUrl, setInviteJoinUrl] = useState("");
@@ -342,7 +369,6 @@ export function App() {
   const [newChannelName, setNewChannelName] = useState("");
   const [newChannelType, setNewChannelType] = useState("text");
   const [newChannelParentId, setNewChannelParentId] = useState("");
-  const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [friendRequests, setFriendRequests] = useState({
     incoming: [],
     outgoing: [],
@@ -541,6 +567,7 @@ export function App() {
   const [presenceByUserId, setPresenceByUserId] = useState({});
   const [routePath, setRoutePath] = useState(getAppRouteFromLocation);
   const [downloadsMenuOpen, setDownloadsMenuOpen] = useState(false);
+  const [downloadTargets, setDownloadTargets] = useState(DOWNLOAD_TARGETS);
   const [dialogModal, setDialogModal] = useState(null);
   const [gatewayConnected, setGatewayConnected] = useState(false);
   const [nodeGatewayConnected, setNodeGatewayConnected] = useState(false);
@@ -578,6 +605,14 @@ export function App() {
   const [serverExtensionCommands, setServerExtensionCommands] = useState([]);
   const [slashSelectionIndex, setSlashSelectionIndex] = useState(0);
   const [emoteSelectionIndex, setEmoteSelectionIndex] = useState(0);
+  const [serverAdminIntent, setServerAdminIntent] = useState({
+    nonce: 0,
+    serverId: "",
+    guildId: "",
+    tab: "overview",
+    channelId: "",
+    channelAction: "",
+  });
 
   function applyNoiseSuppressionPreset(nextPresetRaw) {
     const nextPreset = normalizeNoiseSuppressionPresetForUi(nextPresetRaw);
@@ -625,6 +660,9 @@ export function App() {
   const nodeGatewayWsRef = useRef(null);
   const nodeGatewayHeartbeatRef = useRef(null);
   const nodeGatewayReadyRef = useRef(false);
+  const serverMediaGatewayWsRef = useRef(null);
+  const serverMediaGatewayReadyRef = useRef(false);
+  const serverMediaGatewayHeartbeatRef = useRef(null);
   const voiceGatewayCandidatesRef = useRef([]);
   const voiceSpeakingDetectorRef = useRef({
     audioCtx: null,
@@ -702,6 +740,13 @@ export function App() {
   }
   const selfStatusRef = useRef(selfStatus);
   selfStatusRef.current = selfStatus;
+  const notificationSoundUrlRef = useRef("");
+  notificationSoundUrlRef.current =
+    profileImageUrl(profile?.notificationSoundUrl || "") || "";
+
+  function resolveNotificationSoundUrl(value = "") {
+    return profileImageUrl(value) || "";
+  }
 
   function getPresence(userId) {
     if (!userId) return "offline";
@@ -883,17 +928,25 @@ export function App() {
   const memberProfilePopoutRef = useRef(null);
   const downloadMenuRef = useRef(null);
   const preferredDownloadTarget = useMemo(
-    () => getPreferredDownloadTarget(DOWNLOAD_TARGETS),
-    [],
+    () => getPreferredDownloadTarget(downloadTargets),
+    [downloadTargets],
   );
+  const mobileDownloadTarget = useMemo(
+    () => getMobileDownloadTarget(downloadTargets),
+    [downloadTargets],
+  );
+  const deviceDownloadContext = useMemo(() => getDeviceDownloadContext(), []);
   const isDesktopRuntime = useMemo(() => {
     if (typeof window === "undefined") return false;
     return window.location.protocol === "file:" || shouldSkipLandingPage();
   }, []);
+  const isMobileVisitor = deviceDownloadContext.isMobile && !isDesktopRuntime;
+  const isAndroidVisitor = deviceDownloadContext.isAndroid && !isDesktopRuntime;
   const loadedClientExtensionIdsRef = useRef(new Set());
   const desktopSessionLoadedRef = useRef(false);
   const extensionPanelsRef = useRef([]);
   const serversRef = useRef([]);
+  const teamSpeakBridgeAutoSyncRef = useRef({});
   const dragEasterEggBufferRef = useRef("");
   const storageScope = me?.id || "anonymous";
 
@@ -975,6 +1028,174 @@ export function App() {
     });
   }
 
+  function getMessageReportIssueText(issue) {
+    const path = Array.isArray(issue?.path) ? issue.path : [];
+    const label = String(path[path.length - 1] || "request")
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/[_-]+/g, " ")
+      .trim();
+    const prettyLabel = label
+      ? label.charAt(0).toUpperCase() + label.slice(1)
+      : "Request";
+    return `${prettyLabel}: ${String(issue?.message || "Invalid value.")}`;
+  }
+
+  function normalizeAttachmentForReport(attachment) {
+    if (!attachment || typeof attachment !== "object") return null;
+    const fileName = String(attachment.fileName || attachment.name || "").trim();
+    const contentType = String(
+      attachment.contentType || attachment.content_type || "",
+    ).trim();
+    const url = String(attachment.url || "").trim();
+    if (!fileName && !contentType && !url) return null;
+    return {
+      fileName: fileName.slice(0, 180),
+      contentType: contentType.slice(0, 120),
+      url: url.slice(0, 512),
+    };
+  }
+
+  function serializeMessageForReport(message) {
+    if (!message || typeof message !== "object") return null;
+    const attachments = Array.isArray(message.attachments)
+      ? message.attachments
+          .map((attachment) => normalizeAttachmentForReport(attachment))
+          .filter(Boolean)
+          .slice(0, 8)
+      : [];
+    return {
+      messageId: String(message.id || "").trim(),
+      authorUserId: String(message.authorId || message.author_id || "").trim(),
+      authorName: String(
+        message.author || message.authorName || message.displayName || "",
+      ).trim(),
+      createdAt: String(message.createdAt || message.created_at || "").trim(),
+      content: String(message.content || "").trim(),
+      attachments,
+    };
+  }
+
+  function buildMessageReportPayload(message) {
+    if (!message?.id || !message?.authorId) return null;
+    const sourceMessages =
+      message.kind === "dm" ? activeDm?.messages || [] : messages || [];
+    const targetId = String(message.id || "").trim();
+    const messageIndex = sourceMessages.findIndex(
+      (entry) => String(entry?.id || "").trim() === targetId,
+    );
+    const nearbyMessages =
+      messageIndex >= 0
+        ? sourceMessages.slice(
+            Math.max(0, messageIndex - 2),
+            Math.min(sourceMessages.length, messageIndex + 3),
+          )
+        : [message];
+    const selectedSnapshot = serializeMessageForReport(message);
+    const serializedNearby = nearbyMessages
+      .map((entry) => serializeMessageForReport(entry))
+      .filter(Boolean);
+    const nearbyReportedMessage =
+      serializedNearby.find((entry) => entry.messageId === targetId) || null;
+    if (!selectedSnapshot && !nearbyReportedMessage) return null;
+    const reportedMessage = {
+      ...(nearbyReportedMessage || {}),
+      ...(selectedSnapshot || {}),
+      attachments:
+        selectedSnapshot?.attachments?.length
+          ? selectedSnapshot.attachments
+          : nearbyReportedMessage?.attachments || [],
+    };
+
+    const contextMessages = serializedNearby.filter(
+      (entry) => entry.messageId !== reportedMessage.messageId,
+    );
+
+    return {
+      reportedUserId: String(message.authorId || "").trim(),
+      reportedUsername: String(
+        message.authorUsername || message.author || "",
+      ).trim(),
+      source:
+        message.kind === "server"
+          ? {
+              kind: "server",
+              serverId: activeGuildId || activeGuild?.id || "",
+              serverName: activeServer?.name || activeGuild?.name || "",
+              channelId: activeChannelId || activeChannel?.id || "",
+              channelName: activeChannel?.name || "",
+            }
+          : {
+              kind: "dm",
+              dmThreadId: activeDm?.id || message.threadId || "",
+              dmTitle: activeDm?.name || String(message.author || "").trim(),
+            },
+      reportedMessage,
+      contextMessages,
+    };
+  }
+
+  async function reportMessage(message) {
+    if (!accessToken) {
+      setStatus("Sign in to report messages.");
+      return;
+    }
+
+    const payload = buildMessageReportPayload(message);
+    if (!payload) {
+      setStatus("This message could not be reported.");
+      return;
+    }
+
+    const note = await promptText(
+      `Add any extra context for support about ${message.author || "this message"}. Leave it blank to just send the message snapshot and nearby context.\n\nUpdates will be sent to ${me?.email || "your account email"}.`,
+      "",
+    );
+    if (note === null) return;
+
+    setStatus("Sending message report...");
+    try {
+      const result = await api("/v1/support/message-reports", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          ...payload,
+          reportNote: String(note || "").trim() || undefined,
+        }),
+      });
+
+      const ticketReference = result?.ticket?.reference || "support";
+      const deliveryState = String(result?.emailDelivery?.state || "").trim();
+      const emailTail =
+        deliveryState === "sent"
+          ? ` Updates were emailed to ${me?.email || "your account email"}.`
+          : deliveryState === "unavailable"
+            ? " The report was saved, but email updates are not configured yet."
+            : deliveryState === "failed"
+              ? " The report was saved, but the email update failed."
+              : "";
+
+      setStatus(
+        result?.mode === "appended"
+          ? `Added this report to ticket ${ticketReference}.${emailTail}`
+          : `Created support ticket ${ticketReference} for this report.${emailTail}`,
+      );
+    } catch (error) {
+      if (error?.message === "CANNOT_REPORT_SELF") {
+        setStatus("You cannot report your own message.");
+        return;
+      }
+      if (error?.message === "REPORTED_USER_NOT_FOUND") {
+        setStatus("That account could not be found anymore.");
+        return;
+      }
+      if (error?.message === "VALIDATION_ERROR" && error?.issues?.length) {
+        setStatus(getMessageReportIssueText(error.issues[0]));
+        return;
+      }
+      setStatus(describeApiError(error, "Failed to report the message."));
+    }
+  }
+
   function navigateAppRoute(nextRoute, { replace = false } = {}) {
     writeAppRoute(nextRoute, { replace });
     setRoutePath(getAppRouteFromLocation());
@@ -1025,6 +1246,60 @@ export function App() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const shouldUseDocumentScroll = routePath === APP_ROUTE_HOME;
+    document.body.classList.toggle("landing-mode", shouldUseDocumentScroll);
+    return () => {
+      document.body.classList.remove("landing-mode");
+    };
+  }, [routePath]);
+
+  useEffect(() => {
+    if (typeof AbortController === "undefined") return undefined;
+
+    let disposed = false;
+    let controller = new AbortController();
+
+    const refreshTargets = () => {
+      controller.abort();
+      controller = new AbortController();
+      fetchDownloadTargets(CORE_API, { signal: controller.signal }).then(
+        (targets) => {
+          if (!disposed && !controller.signal.aborted) {
+            setDownloadTargets(targets);
+          }
+        },
+      );
+    };
+
+    refreshTargets();
+
+    if (routePath !== APP_ROUTE_HOME) {
+      return () => {
+        disposed = true;
+        controller.abort();
+      };
+    }
+
+    const handleVisibilityOrFocus = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      refreshTargets();
+    };
+
+    const intervalId = window.setInterval(refreshTargets, 60_000);
+    window.addEventListener("focus", handleVisibilityOrFocus);
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+
+    return () => {
+      disposed = true;
+      controller.abort();
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+    };
+  }, [routePath]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1243,6 +1518,54 @@ export function App() {
     }, 30000);
     return () => window.clearInterval(timer);
   }, [accessToken, activeServerId]);
+
+  useEffect(() => {
+    const activeServer =
+      servers.find((server) => server.id === activeServerId) || null;
+    if (!accessToken || !activeServer) return;
+
+    const hasTeamSpeakSyncCommand = (serverExtensionCommands || []).some(
+      (command) =>
+        command?.name === "teamspeak-compat.ts-direct-bridge-sync",
+    );
+    if (!hasTeamSpeakSyncCommand) return;
+
+    let cancelled = false;
+    const syncNow = async () => {
+      const lastRunAt =
+        teamSpeakBridgeAutoSyncRef.current[activeServer.id] || 0;
+      if (Date.now() - lastRunAt < 45000) return;
+      teamSpeakBridgeAutoSyncRef.current[activeServer.id] = Date.now();
+      try {
+        await nodeApi(
+          activeServer.baseUrl,
+          `/v1/extensions/commands/${encodeURIComponent(
+            "teamspeak-compat.ts-direct-bridge-sync",
+          )}/execute`,
+          activeServer.membershipToken,
+          {
+            method: "POST",
+            body: JSON.stringify({ args: {} }),
+          },
+        );
+      } catch {
+        if (!cancelled) {
+          teamSpeakBridgeAutoSyncRef.current[activeServer.id] =
+            Date.now() - 30000;
+        }
+      }
+    };
+
+    syncNow().catch(() => {});
+    const timer = window.setInterval(() => {
+      syncNow().catch(() => {});
+    }, 60000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [accessToken, activeServerId, serverExtensionCommands, servers]);
 
   useEffect(() => {
     if (!accessToken || servers.length === 0) return;
@@ -1915,7 +2238,9 @@ export function App() {
   );
   const canAccessServerAdminPanel = useMemo(() => {
     return servers.some((server) => {
-      const roles = Array.isArray(server?.roles) ? server.roles : [];
+      const roles = Array.isArray(server?.roles)
+        ? server.roles.map((role) => String(role || "").toLowerCase())
+        : [];
       return (
         roles.includes("owner") ||
         roles.includes("platform_admin") ||
@@ -2744,6 +3069,7 @@ export function App() {
   const klipySaveStateByItemId = useMemo(() => {
     const next = {};
     for (const item of klipyItems) {
+      if (String(item?.type || "").trim().toLowerCase() === "ad") continue;
       const itemKey = String(item?.id || item?.sourceUrl || "").trim();
       if (!itemKey) continue;
       const favouriteKey = buildFavouriteMediaKey("external_url", item?.sourceUrl);
@@ -3562,7 +3888,7 @@ export function App() {
         setMe(meData);
 
         const [profileData, serverData, emoteCatalogData] = await Promise.all([
-          api(`/v1/users/${meData.id}/profile`, {
+          api("/v1/me/profile", {
             headers: { Authorization: `Bearer ${accessToken}` },
           }),
           api("/v1/servers", {
@@ -3584,6 +3910,7 @@ export function App() {
           bio: profileData.bio || "",
           pfpUrl: profileData.pfpUrl || "",
           bannerUrl: profileData.bannerUrl || "",
+          notificationSoundUrl: profileData.notificationSoundUrl || "",
         });
 
         setGlobalCustomEmoteCatalog(
@@ -3800,7 +4127,10 @@ export function App() {
               const isCallRequestMessage =
                 String(incoming.content || "").trim() === "__CALL_REQUEST__";
               if (!isCallRequestMessage) {
-                playNotificationBeep(selfStatusRef.current === "dnd");
+                playNotificationBeep({
+                  mute: selfStatusRef.current === "dnd",
+                  soundUrl: notificationSoundUrlRef.current,
+                });
                 setDmNotification({ dmId: threadId, at: Date.now() });
                 notifyDesktopDevice({
                   title: incoming.author || "New message",
@@ -3890,7 +4220,10 @@ export function App() {
                 });
                 return currentFriends; // no mutation
               });
-              playNotificationBeep(selfStatusRef.current === "dnd");
+              playNotificationBeep({
+                mute: selfStatusRef.current === "dnd",
+                soundUrl: notificationSoundUrlRef.current,
+              });
             } else {
               // We are the caller — transition outgoing toast to "ringing" state
               setOutgoingCall((prev) =>
@@ -4281,6 +4614,10 @@ export function App() {
           // Everything else stays the same as your existing handler:
           // MESSAGE_* + VOICE_* dispatches, etc.
           if (msg.op === "DISPATCH" && typeof msg.t === "string") {
+            if (handleVoiceGatewayDispatch(msg)) {
+              return;
+            }
+
             if (msg.t === "VOICE_ERROR") {
               const error = msg.d?.error || "VOICE_ERROR";
               const details = msg.d?.details ? ` (${msg.d.details})` : "";
@@ -4724,8 +5061,12 @@ export function App() {
     ];
     for (const message of visibleMessages) {
       for (const attachment of message?.attachments || []) {
-        if (!attachment?.id || !isImageMimeType(attachment.contentType))
-          continue;
+        if (!attachment?.id) continue;
+        const mediaKind = getMediaAssetKind({
+          url: attachment?.url || "",
+          contentType: attachment?.contentType || "",
+        });
+        if (!mediaKind) continue;
         if (attachmentPreviewUrlById[attachment.id]) continue;
         if (attachmentPreviewFetchInFlightRef.current.has(attachment.id))
           continue;
@@ -4762,11 +5103,12 @@ export function App() {
       })
         .then((response) => (response.ok ? response.blob() : null))
         .then((blob) => {
-          if (
-            !blob ||
-            !isImageMimeType(blob.type || attachment.contentType || "")
-          )
-            return;
+          if (!blob) return;
+          const mediaKind = getMediaAssetKind({
+            url: attachment?.url || "",
+            contentType: blob.type || attachment.contentType || "",
+          });
+          if (!mediaKind) return;
           const objectUrl = URL.createObjectURL(blob);
           setAttachmentPreviewUrlById((current) => {
             const existing = current[attachment.id];
@@ -4849,7 +5191,7 @@ export function App() {
     });
     attachmentPreviewFetchInFlightRef.current.clear();
     setAttachmentPreviewUrlById({});
-  }, [activeServerId]);
+  }, [activeServerId, activeChannelId, activeDmId]);
 
   useEffect(() => {
     if (favouriteMediaModalOpen) return;
@@ -4914,7 +5256,7 @@ export function App() {
       .catch((error) => {
         setGuilds([]);
         setGuildState(null);
-        setStatus(`Workspace list failed: ${error.message}`);
+        setStatus(`Server data failed to load: ${error.message}`);
       });
   }, [activeServer, activeGuildId, navMode]);
 
@@ -4948,7 +5290,7 @@ export function App() {
           setGuildState(null);
           setActiveChannelId("");
           setMessages([]);
-          setStatus(`Workspace state failed: ${error.message}`);
+          setStatus(`Server state failed to load: ${error.message}`);
         });
 
     loadGuildState();
@@ -5026,8 +5368,8 @@ export function App() {
       (currentVoiceUsesPrivateGateway
         ? !!privateCallGatewayReadyRef.current &&
           privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
-        : !!nodeGatewayReadyRef.current &&
-          nodeGatewayWsRef.current?.readyState === WebSocket.OPEN);
+        : !!serverMediaGatewayReadyRef.current &&
+          serverMediaGatewayWsRef.current?.readyState === WebSocket.OPEN);
 
     if (
       !isInVoiceChannel ||
@@ -5133,8 +5475,8 @@ export function App() {
             (currentVoiceUsesPrivateGateway
               ? privateCallGatewayReadyRef.current &&
                 privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
-              : nodeGatewayReadyRef.current &&
-                nodeGatewayWsRef.current?.readyState === WebSocket.OPEN)
+              : serverMediaGatewayReadyRef.current &&
+                serverMediaGatewayWsRef.current?.readyState === WebSocket.OPEN)
           ) {
             void sendNodeVoiceDispatch("VOICE_SPEAKING", {
               guildId: voiceConnectedGuildId,
@@ -6202,8 +6544,29 @@ export function App() {
     setKlipyLoading(true);
 
     try {
+      const viewportWidth =
+        typeof window === "undefined"
+          ? 360
+          : Math.max(320, Math.round(window.innerWidth || 0));
+      const viewportHeight =
+        typeof window === "undefined"
+          ? 640
+          : Math.max(480, Math.round(window.innerHeight || 0));
+      const pixelRatio =
+        typeof window === "undefined"
+          ? 1
+          : Math.max(1, Number(window.devicePixelRatio || 1));
+      const adMaxWidth = Math.max(160, Math.min(viewportWidth - 120, 320));
       const params = new URLSearchParams({
         limit: "24",
+        adMinWidth: "160",
+        adMaxWidth: String(adMaxWidth),
+        adMinHeight: "50",
+        adMaxHeight: "250",
+        adPosition: "2",
+        deviceWidth: String(viewportWidth),
+        deviceHeight: String(viewportHeight),
+        pixelRatio: pixelRatio.toFixed(2),
       });
       if (nextToken) params.set("pos", nextToken);
       if (trimmedQuery) params.set("q", trimmedQuery);
@@ -6391,6 +6754,10 @@ export function App() {
   }
 
   async function insertKlipyMedia(item) {
+    if (String(item?.type || "").trim().toLowerCase() === "ad") {
+      setStatus("Klipy advertisements can't be inserted into chat.");
+      return;
+    }
     const itemKey = String(item?.id || item?.sourceUrl || "").trim();
     const sourceUrl = String(item?.sourceUrl || "").trim();
     if (!itemKey || !sourceUrl) {
@@ -6411,6 +6778,10 @@ export function App() {
   }
 
   async function toggleKlipyFavourite(item) {
+    if (String(item?.type || "").trim().toLowerCase() === "ad") {
+      setStatus("Klipy advertisements can't be saved as favourites.");
+      return;
+    }
     const draft = buildFavouriteMediaDraftFromKlipyItem(item);
     if (!draft) {
       setStatus("Klipy media is missing a usable source URL.");
@@ -7502,10 +7873,12 @@ export function App() {
           bio: profileForm.bio || null,
           pfpUrl: normalizeImageUrlInput(profileForm.pfpUrl) || null,
           bannerUrl: normalizeImageUrlInput(profileForm.bannerUrl) || null,
+          notificationSoundUrl:
+            normalizeImageUrlInput(profileForm.notificationSoundUrl) || null,
         }),
       });
       if (me?.id) {
-        const updated = await api(`/v1/users/${me.id}/profile`, {
+        const updated = await api("/v1/me/profile", {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         setProfile(updated);
@@ -7524,6 +7897,7 @@ export function App() {
           bio: updated.bio ?? "",
           pfpUrl: updated.pfpUrl ?? "",
           bannerUrl: updated.bannerUrl ?? "",
+          notificationSoundUrl: updated.notificationSoundUrl ?? "",
         });
       } else {
         setProfile((current) => ({ ...current, ...profileForm }));
@@ -7538,12 +7912,28 @@ export function App() {
         setStatus(
           "Invalid image URL. Use uploaded image paths (/v1/profile-images/...), users/... paths, or valid http(s) image URLs.",
         );
+      } else if (
+        msg.includes("INVALID_NOTIFICATION_SOUND") ||
+        msg.toLowerCase().includes("notification sound")
+      ) {
+        setStatus(
+          "Invalid notification sound URL. Use an uploaded audio path (/v1/profile-images/...), users/... paths, or a valid http(s) audio URL.",
+        );
       } else if (msg.includes("USERNAME_TAKEN")) {
         setStatus("That username is already taken.");
       } else if (msg.includes("USERNAME_RESERVED")) {
         setStatus("That username is reserved.");
       } else setStatus(`Profile update failed: ${msg}`);
     }
+  }
+
+  function testNotificationSound() {
+    playNotificationBeep({
+      mute: false,
+      soundUrl: resolveNotificationSoundUrl(
+        profileForm.notificationSoundUrl || profile?.notificationSoundUrl || "",
+      ),
+    });
   }
 
   function updateFullProfileElement(elementId, patch) {
@@ -7811,7 +8201,9 @@ export function App() {
       }
       setStatus("Rich presence updated.");
     } catch (error) {
-      setStatus(`Rich presence update failed: ${error.message}`);
+      setStatus(
+        `Rich presence update failed: ${describeApiError(error, "Check your image URLs, button links, and text length.")}`,
+      );
     }
   }
 
@@ -7927,6 +8319,112 @@ export function App() {
     }
   }
 
+  function resetNewServerTeamSpeakBridge() {
+    setNewServerTeamSpeakBridge({
+      enabled: false,
+      host: "",
+      queryPort: "10011",
+      serverPort: "9987",
+      username: "",
+      password: "",
+      categoryName: "teamspeak",
+      syncIntervalSec: "60",
+    });
+  }
+
+  function buildNewServerTeamSpeakBridgeConfig() {
+    const queryPort = Math.max(
+      1,
+      Math.min(65535, Number.parseInt(newServerTeamSpeakBridge.queryPort, 10) || 10011),
+    );
+    const serverPort = Math.max(
+      1,
+      Math.min(65535, Number.parseInt(newServerTeamSpeakBridge.serverPort, 10) || 9987),
+    );
+    const syncIntervalSec = Math.max(
+      15,
+      Math.min(
+        900,
+        Number.parseInt(newServerTeamSpeakBridge.syncIntervalSec, 10) || 60,
+      ),
+    );
+    return {
+      enabled: true,
+      host: newServerTeamSpeakBridge.host.trim(),
+      queryPort,
+      serverPort,
+      serverId: "",
+      username: newServerTeamSpeakBridge.username.trim(),
+      password: newServerTeamSpeakBridge.password,
+      categoryName:
+        newServerTeamSpeakBridge.categoryName.trim() || "teamspeak",
+      syncIntervalSec,
+      syncState: {
+        categoryChannelId: "",
+        channelBindings: [],
+        lastSyncedAt: "",
+        lastServerName: "",
+        lastError: "",
+        mirroredChannelCount: 0,
+      },
+    };
+  }
+
+  async function configureTeamSpeakBridgeForServer(serverId, serverBaseUrl) {
+    const directBridge = buildNewServerTeamSpeakBridgeConfig();
+    await api(
+      `/v1/servers/${serverId}/extensions/${encodeURIComponent("teamspeak-compat")}`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ enabled: true }),
+      },
+    );
+    await api(
+      `/v1/servers/${serverId}/extensions/${encodeURIComponent("teamspeak-compat")}/config`,
+      {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          mode: "patch",
+          config: {
+            directBridge,
+          },
+        }),
+      },
+    );
+    const membership = await api(
+      `/v1/servers/${serverId}/membership-token`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    );
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await nodeApi(
+          serverBaseUrl,
+          `/v1/extensions/commands/${encodeURIComponent(
+            "teamspeak-compat.ts-direct-bridge-sync",
+          )}/execute`,
+          membership.membershipToken,
+          {
+            method: "POST",
+            body: JSON.stringify({ args: {} }),
+          },
+        );
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt >= 3) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 750));
+      }
+    }
+    if (lastError) throw lastError;
+  }
+
   async function createServer() {
     if (
       !newServerName.trim() ||
@@ -7934,8 +8432,19 @@ export function App() {
       !newServerLogoUrl.trim()
     )
       return;
+    if (
+      newServerTeamSpeakBridge.enabled &&
+      (!newServerTeamSpeakBridge.host.trim() ||
+        !newServerTeamSpeakBridge.username.trim() ||
+        !newServerTeamSpeakBridge.password)
+    ) {
+      setStatus(
+        "TeamSpeak bridge needs a host, ServerQuery username, and password.",
+      );
+      return;
+    }
     try {
-      await api("/v1/servers", {
+      const created = await api("/v1/servers", {
         method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({
@@ -7945,11 +8454,26 @@ export function App() {
           bannerUrl: normalizeImageUrlInput(newServerBannerUrl) || null,
         }),
       });
+      let statusMessage = "Server provider added.";
+      if (newServerTeamSpeakBridge.enabled && created?.serverId) {
+        try {
+          await configureTeamSpeakBridgeForServer(
+            created.serverId,
+            newServerBaseUrl.trim(),
+          );
+          statusMessage =
+            "Server provider added and TeamSpeak mirror synced.";
+        } catch (bridgeError) {
+          statusMessage =
+            `Server provider added, but TeamSpeak mirror setup failed: ${bridgeError?.message || "UNKNOWN_ERROR"}`;
+        }
+      }
       setNewServerName("");
       setNewServerBaseUrl("https://");
       setNewServerLogoUrl("");
       setNewServerBannerUrl("");
-      setStatus("Server provider added.");
+      resetNewServerTeamSpeakBridge();
+      setStatus(statusMessage);
       const refreshed = await api("/v1/servers", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
@@ -7977,43 +8501,6 @@ export function App() {
       const next = { ...prev, ...patch };
       return { ...current, [activeServerId]: next };
     });
-  }
-
-  async function createWorkspace() {
-    if (
-      !activeServer?.baseUrl ||
-      !activeServer?.membershipToken ||
-      !newWorkspaceName?.trim()
-    ) {
-      setStatus("Select a server and enter a workspace name.");
-      return;
-    }
-    try {
-      const data = await nodeApi(
-        activeServer.baseUrl,
-        "/v1/guilds",
-        activeServer.membershipToken,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            name: newWorkspaceName.trim(),
-            createDefaultVoice: true,
-          }),
-        },
-      );
-      setNewWorkspaceName("");
-      setStatus("Workspace created.");
-      const nextGuilds = await nodeApi(
-        activeServer.baseUrl,
-        "/v1/guilds",
-        activeServer.membershipToken,
-      );
-      const list = Array.isArray(nextGuilds) ? nextGuilds : [];
-      setGuilds(list);
-      if (data?.guildId && list.length) setActiveGuildId(data.guildId);
-    } catch (error) {
-      setStatus(`Create workspace failed: ${error.message}`);
-    }
   }
 
   async function createInvite() {
@@ -8864,31 +9351,17 @@ export function App() {
   }
 
   async function openChannelSettings(channel) {
-    if (!channel || !canManageServer || !activeServer || !workingGuildId)
+    if (!channel || !canManageServer || !activeServer || !workingGuildId) {
       return;
-    try {
-      await saveChannelName(channel.id, channel.name);
-      if (
-        await confirmDialog(
-          "Configure visibility (private roles) for this channel/category?",
-          "Channel Visibility",
-        )
-      ) {
-        await setChannelVisibilityByRoles(channel.id);
-      }
-      const state = await nodeApi(
-        activeServer.baseUrl,
-        `/v1/guilds/${workingGuildId}/state`,
-        activeServer.membershipToken,
-      );
-      setGuildState(state);
-      setStatus("Channel settings updated.");
-    } catch (error) {
-      setStatus(`Update channel failed: ${error.message}`);
-    } finally {
-      setChannelContextMenu(null);
-      setCategoryContextMenu(null);
     }
+    openServerAdmin(activeServer.id, {
+      tab: "channels",
+      guildId: workingGuildId,
+      channelId: channel.id,
+      channelAction: "edit",
+    });
+    setChannelContextMenu(null);
+    setCategoryContextMenu(null);
   }
 
   async function deleteChannelById(channel) {
@@ -9293,6 +9766,261 @@ export function App() {
     setSelectedScreenShareProducerId("");
   }
 
+  function handleVoiceGatewayDispatch(msg) {
+    if (msg?.op !== "DISPATCH" || typeof msg?.t !== "string") return false;
+
+    if (msg.t === "VOICE_ERROR") {
+      const error = msg.d?.error || "VOICE_ERROR";
+      const details = msg.d?.details ? ` (${msg.d.details})` : "";
+      const activeVoiceContext = voiceSfuRef.current?.getContext?.() || {};
+      voiceDebug("VOICE_ERROR received", {
+        error,
+        details: msg.d?.details,
+        code: msg.d?.code,
+        context: activeVoiceContext,
+      });
+      rejectPendingVoiceEventsByScope({
+        guildId: msg.d?.guildId ?? activeVoiceContext.guildId ?? null,
+        channelId: msg.d?.channelId ?? activeVoiceContext.channelId ?? null,
+      });
+      if (voiceSession?.channelId) {
+        cleanupVoiceRtc().catch(() => {});
+        return true;
+      }
+      const message = `Voice connection failed: ${error}${details}`;
+      setStatus(message);
+      window.alert(message);
+      return true;
+    }
+
+    if (msg.t === "VOICE_STATE_UPDATE" && msg.d?.guildId && msg.d?.userId) {
+      const guildId = msg.d.guildId;
+      const userId = msg.d.userId;
+      const channelId = msg.d.channelId || null;
+      setVoiceStatesByGuild((prev) => {
+        const nextGuild = { ...(prev[guildId] || {}) };
+        if (channelId) {
+          nextGuild[userId] = {
+            guildId,
+            channelId,
+            userId,
+            muted: !!msg.d.muted,
+            deafened: !!msg.d.deafened,
+          };
+        } else {
+          delete nextGuild[userId];
+        }
+        return { ...prev, [guildId]: nextGuild };
+      });
+      return true;
+    }
+
+    if (msg.t === "VOICE_STATE_REMOVE" && msg.d?.guildId && msg.d?.userId) {
+      const guildId = msg.d.guildId;
+      const userId = msg.d.userId;
+      setVoiceStatesByGuild((prev) => {
+        if (!prev[guildId]?.[userId]) return prev;
+        const nextGuild = { ...(prev[guildId] || {}) };
+        delete nextGuild[userId];
+        return { ...prev, [guildId]: nextGuild };
+      });
+      return true;
+    }
+
+    if (msg.t === "VOICE_SPEAKING" && msg.d?.guildId && msg.d?.userId) {
+      const guildId = msg.d.guildId;
+      const userId = msg.d.userId;
+      const speaking = !!msg.d.speaking;
+      setVoiceSpeakingByGuild((prev) => ({
+        ...prev,
+        [guildId]: { ...(prev[guildId] || {}), [userId]: speaking },
+      }));
+      return true;
+    }
+
+    return false;
+  }
+
+  function closeDedicatedVoiceGateway(scope = "server") {
+    const wsRef =
+      scope === "private" ? privateCallGatewayWsRef : serverMediaGatewayWsRef;
+    const readyRef =
+      scope === "private"
+        ? privateCallGatewayReadyRef
+        : serverMediaGatewayReadyRef;
+    const heartbeatRef =
+      scope === "private"
+        ? privateCallGatewayHeartbeatRef
+        : serverMediaGatewayHeartbeatRef;
+
+    readyRef.current = false;
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
+    if (wsRef.current) {
+      try {
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      } catch {}
+      wsRef.current = null;
+    }
+  }
+
+  async function connectDedicatedVoiceGateway({
+    scope = "server",
+    wsUrl,
+    mediaToken,
+    guildId,
+    channelId,
+  }) {
+    if (!wsUrl || !mediaToken) {
+      throw new Error("VOICE_MEDIA_SESSION_INCOMPLETE");
+    }
+
+    const wsRef =
+      scope === "private" ? privateCallGatewayWsRef : serverMediaGatewayWsRef;
+    const readyRef =
+      scope === "private"
+        ? privateCallGatewayReadyRef
+        : serverMediaGatewayReadyRef;
+    const heartbeatRef =
+      scope === "private"
+        ? privateCallGatewayHeartbeatRef
+        : serverMediaGatewayHeartbeatRef;
+
+    closeDedicatedVoiceGateway(scope);
+
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      readyRef.current = false;
+      let settled = false;
+
+      const finishResolve = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+
+      const finishReject = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(
+          error instanceof Error
+            ? error
+            : new Error(String(error || "VOICE_GATEWAY_ERROR")),
+        );
+      };
+
+      const timeout = setTimeout(() => {
+        try {
+          ws.close();
+        } catch {}
+        finishReject(new Error("VOICE_GATEWAY_TIMEOUT"));
+      }, 15000);
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ op: "IDENTIFY", d: { mediaToken } }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          resolvePendingVoiceEvent(msg);
+
+          if (msg.op === "HELLO" && msg.d?.heartbeat_interval) {
+            if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+            heartbeatRef.current = setInterval(() => {
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ op: "HEARTBEAT" }));
+              }
+            }, msg.d.heartbeat_interval);
+            return;
+          }
+
+          if (msg.op === "READY") {
+            readyRef.current = true;
+            if (scope === "server") {
+              voiceGatewayCandidatesRef.current = [wsUrl];
+            }
+            if (guildId) {
+              ws.send(
+                JSON.stringify({
+                  op: "DISPATCH",
+                  t: "SUBSCRIBE_GUILD",
+                  d: { guildId },
+                }),
+              );
+            }
+            if (channelId) {
+              ws.send(
+                JSON.stringify({
+                  op: "DISPATCH",
+                  t: "SUBSCRIBE_CHANNEL",
+                  d: { channelId },
+                }),
+              );
+            }
+            finishResolve();
+            return;
+          }
+
+          if (msg.op === "ERROR") {
+            finishReject(new Error(msg.d?.error || "VOICE_GATEWAY_ERROR"));
+            return;
+          }
+
+          handleVoiceGatewayDispatch(msg);
+        } catch {}
+      };
+
+      ws.onerror = () => {};
+      ws.onclose = (event) => {
+        if (wsRef.current === ws) wsRef.current = null;
+        readyRef.current = false;
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current);
+          heartbeatRef.current = null;
+        }
+        if (!settled) {
+          const closeReason = String(event?.reason || "").trim();
+          const closeCode = Number(event?.code || 1000);
+          finishReject(
+            new Error(
+              closeReason
+                ? `VOICE_GATEWAY_CLOSED:${closeReason}`
+                : `VOICE_GATEWAY_CLOSED_${closeCode}`,
+            ),
+          );
+          return;
+        }
+
+        rejectPendingVoiceEvents("VOICE_GATEWAY_CLOSED");
+
+        const scopeIsActive =
+          scope === "private"
+            ? !!activePrivateCallRef.current?.callId
+            : !!voiceConnectedGuildId &&
+              !!voiceConnectedChannelId &&
+              !activePrivateCallRef.current?.callId;
+        if (scopeIsActive) {
+          const closeReason = String(event?.reason || "").trim();
+          setStatus(
+            closeReason
+              ? `Voice gateway disconnected: ${closeReason}`
+              : "Voice gateway disconnected.",
+          );
+        }
+      };
+    });
+  }
+
   async function waitForVoiceGatewayReady(timeoutMs = 15000) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
@@ -9306,6 +10034,14 @@ export function App() {
       )
         return pcWs;
 
+      const mediaWs = serverMediaGatewayWsRef.current;
+      if (
+        mediaWs &&
+        mediaWs.readyState === WebSocket.OPEN &&
+        serverMediaGatewayReadyRef.current
+      )
+        return mediaWs;
+
       const ws = nodeGatewayWsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN && nodeGatewayReadyRef.current)
         return ws;
@@ -9316,6 +10052,8 @@ export function App() {
     // Build a descriptive error so problems are easy to diagnose
     const pcWs = privateCallGatewayWsRef.current;
     const pcState = pcWs?.readyState;
+    const mediaWs = serverMediaGatewayWsRef.current;
+    const mediaState = mediaWs?.readyState;
     const wsState = nodeGatewayWsRef.current?.readyState;
     const stateName = (s) =>
       s === WebSocket.CONNECTING
@@ -9335,6 +10073,7 @@ export function App() {
     throw new Error(
       `VOICE_GATEWAY_UNAVAILABLE:` +
         `pcReady=${privateCallGatewayReadyRef.current ? "1" : "0"},pcWs=${stateName(pcState)},` +
+        `mediaReady=${serverMediaGatewayReadyRef.current ? "1" : "0"},mediaWs=${stateName(mediaState)},` +
         `nodeReady=${nodeGatewayReadyRef.current ? "1" : "0"},nodeWs=${stateName(wsState)},` +
         `candidates=${candidates}`,
     );
@@ -9346,28 +10085,35 @@ export function App() {
   }
 
   function canUseRealtimeVoiceGateway() {
-    const ws = nodeGatewayWsRef.current;
+    const mediaWs = serverMediaGatewayWsRef.current;
+    const nodeWs = nodeGatewayWsRef.current;
     const usable = !!(
-      ws &&
-      ws.readyState === WebSocket.OPEN &&
-      nodeGatewayReadyRef.current
+      (mediaWs &&
+        mediaWs.readyState === WebSocket.OPEN &&
+        serverMediaGatewayReadyRef.current) ||
+      (nodeWs &&
+        nodeWs.readyState === WebSocket.OPEN &&
+        nodeGatewayReadyRef.current)
     );
     if (voiceDebugEnabled) {
-      const wsState = ws?.readyState;
-      const wsStateName =
-        wsState === WebSocket.CONNECTING
+      const mediaState = mediaWs?.readyState;
+      const nodeState = nodeWs?.readyState;
+      const stateName = (state) =>
+        state === WebSocket.CONNECTING
           ? "CONNECTING"
-          : wsState === WebSocket.OPEN
+          : state === WebSocket.OPEN
             ? "OPEN"
-            : wsState === WebSocket.CLOSING
+            : state === WebSocket.CLOSING
               ? "CLOSING"
-              : wsState === WebSocket.CLOSED
+              : state === WebSocket.CLOSED
                 ? "CLOSED"
                 : "MISSING";
       voiceDebug("canUseRealtimeVoiceGateway", {
         usable,
-        readyState: wsStateName,
-        gatewayReady: nodeGatewayReadyRef.current,
+        mediaReadyState: stateName(mediaState),
+        mediaGatewayReady: serverMediaGatewayReadyRef.current,
+        nodeReadyState: stateName(nodeState),
+        nodeGatewayReady: nodeGatewayReadyRef.current,
         activeGuildId,
         activeChannelId,
       });
@@ -9482,9 +10228,31 @@ export function App() {
       !activeServer?.membershipToken
     )
       return;
+    let mediaSessionError = null;
     let sfuError = null;
     try {
       setStatus(`Joining ${channel.name}...`);
+      try {
+        const mediaSession = await nodeApi(
+          activeServer.baseUrl,
+          `/v1/channels/${channel.id}/media-session`,
+          activeServer.membershipToken,
+          { method: "POST" },
+        );
+        if (mediaSession?.mediaWsUrl && mediaSession?.mediaToken) {
+          await connectDedicatedVoiceGateway({
+            scope: "server",
+            wsUrl: mediaSession.mediaWsUrl,
+            mediaToken: mediaSession.mediaToken,
+            guildId: mediaSession.guildId || activeGuildId,
+            channelId: mediaSession.channelId || channel.id,
+          });
+        }
+      } catch (error) {
+        mediaSessionError = error;
+        closeDedicatedVoiceGateway("server");
+      }
+
       await voiceSfuRef.current?.join({
         guildId: activeGuildId,
         channelId: channel.id,
@@ -9501,7 +10269,8 @@ export function App() {
       setStatus(`Joined ${channel.name}.`);
       return;
     } catch (error) {
-      sfuError = error;
+      sfuError = error || mediaSessionError;
+      closeDedicatedVoiceGateway("server");
     }
 
     const allowRestFallback =
@@ -9583,8 +10352,8 @@ export function App() {
 
   /**
    * Connect to the voice channel for an accepted private call.
-   * Opens a dedicated WebSocket to the official node (via core gateway proxy)
-   * so it doesn't interfere with the current server node connection.
+   * Opens a dedicated WebSocket to the media service so it doesn't interfere
+   * with the current server node connection.
    */
   async function joinPrivateVoiceCall(callId) {
     if (!accessToken || !callId) return;
@@ -9593,7 +10362,7 @@ export function App() {
     try {
       setStatus("Joining voice call…");
 
-      // 1. Ask core for a membership token + channel info
+      // 1. Ask core for a media token + room info
       const joinData = await api("/call/join", {
         method: "POST",
         headers: {
@@ -9610,107 +10379,131 @@ export function App() {
         return;
       }
 
-      const { membershipToken, nodeBaseUrl, guildId, channelId } = joinData;
-      if (!membershipToken || !nodeBaseUrl || !guildId || !channelId) {
+      const {
+        mediaToken,
+        mediaWsUrl,
+        membershipToken,
+        nodeBaseUrl,
+        guildId,
+        channelId,
+      } = joinData;
+      if (!guildId || !channelId) {
         setStatus("Voice join failed: incomplete call data from server.");
         return;
       }
 
-      // 2. Open a dedicated gateway WS to the official node.
-      //    The core gateway will proxy voice traffic when given a membershipToken.
-      const coreGatewayWsUrl = (() => {
-        const candidates = getCoreGatewayWsCandidates();
-        return candidates[0] || getDefaultCoreGatewayWsUrl();
-      })();
+      // 2. Open a dedicated gateway WS to the media service when available.
+      //    Older deployments can still fall back to the legacy core proxy path.
+      if (mediaWsUrl && mediaToken) {
+        await connectDedicatedVoiceGateway({
+          scope: "private",
+          wsUrl: mediaWsUrl,
+          mediaToken,
+          guildId,
+          channelId,
+        });
+      } else {
+        if (!membershipToken) {
+          throw new Error("PRIVATE_CALL_GATEWAY_TOKEN_MISSING");
+        }
 
-      await new Promise((resolve, reject) => {
-        const ws = new WebSocket(coreGatewayWsUrl);
-        privateCallGatewayWsRef.current = ws;
-        privateCallGatewayReadyRef.current = false;
-        let settled = false;
+        const coreGatewayWsUrl = (() => {
+          const candidates = getCoreGatewayWsCandidates();
+          return candidates[0] || getDefaultCoreGatewayWsUrl();
+        })();
 
-        const finishResolve = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          resolve();
-        };
+        closeDedicatedVoiceGateway("private");
 
-        const finishReject = (error) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          reject(
-            error instanceof Error
-              ? error
-              : new Error(String(error || "PRIVATE_CALL_GATEWAY_ERROR")),
-          );
-        };
+        await new Promise((resolve, reject) => {
+          const ws = new WebSocket(coreGatewayWsUrl);
+          privateCallGatewayWsRef.current = ws;
+          privateCallGatewayReadyRef.current = false;
+          let settled = false;
 
-        const timeout = setTimeout(() => {
-          try {
-            ws.close();
-          } catch {}
-          finishReject(new Error("PRIVATE_CALL_GATEWAY_TIMEOUT"));
-        }, 15000);
+          const finishResolve = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            resolve();
+          };
 
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ op: "IDENTIFY", d: { membershipToken } }));
-        };
+          const finishReject = (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            reject(
+              error instanceof Error
+                ? error
+                : new Error(String(error || "PRIVATE_CALL_GATEWAY_ERROR")),
+            );
+          };
 
-        ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            resolvePendingVoiceEvent(msg);
+          const timeout = setTimeout(() => {
+            try {
+              ws.close();
+            } catch {}
+            finishReject(new Error("PRIVATE_CALL_GATEWAY_TIMEOUT"));
+          }, 15000);
 
-            if (msg.op === "HELLO" && msg.d?.heartbeat_interval) {
-              if (privateCallGatewayHeartbeatRef.current)
-                clearInterval(privateCallGatewayHeartbeatRef.current);
-              privateCallGatewayHeartbeatRef.current = setInterval(() => {
-                if (
-                  privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
-                )
-                  privateCallGatewayWsRef.current.send(
-                    JSON.stringify({ op: "HEARTBEAT" }),
-                  );
-              }, msg.d.heartbeat_interval);
-              return;
+          ws.onopen = () => {
+            ws.send(JSON.stringify({ op: "IDENTIFY", d: { membershipToken } }));
+          };
+
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data);
+              resolvePendingVoiceEvent(msg);
+
+              if (msg.op === "HELLO" && msg.d?.heartbeat_interval) {
+                if (privateCallGatewayHeartbeatRef.current)
+                  clearInterval(privateCallGatewayHeartbeatRef.current);
+                privateCallGatewayHeartbeatRef.current = setInterval(() => {
+                  if (
+                    privateCallGatewayWsRef.current?.readyState === WebSocket.OPEN
+                  )
+                    privateCallGatewayWsRef.current.send(
+                      JSON.stringify({ op: "HEARTBEAT" }),
+                    );
+                }, msg.d.heartbeat_interval);
+                return;
+              }
+
+              if (msg.op === "READY") {
+                privateCallGatewayReadyRef.current = true;
+                finishResolve();
+                return;
+              }
+
+              if (msg.op === "ERROR") {
+                finishReject(
+                  new Error(msg.d?.error || "PRIVATE_CALL_GATEWAY_ERROR"),
+                );
+              }
+            } catch {}
+          };
+
+          ws.onerror = () =>
+            finishReject(new Error("PRIVATE_CALL_GATEWAY_WS_ERROR"));
+          ws.onclose = (event) => {
+            privateCallGatewayReadyRef.current = false;
+            if (privateCallGatewayHeartbeatRef.current) {
+              clearInterval(privateCallGatewayHeartbeatRef.current);
+              privateCallGatewayHeartbeatRef.current = null;
             }
-
-            if (msg.op === "READY") {
-              privateCallGatewayReadyRef.current = true;
-              finishResolve();
-              return;
-            }
-
-            if (msg.op === "ERROR") {
+            if (!settled) {
+              const closeReason = String(event?.reason || "").trim();
+              const closeCode = Number(event?.code || 1000);
               finishReject(
-                new Error(msg.d?.error || "PRIVATE_CALL_GATEWAY_ERROR"),
+                new Error(
+                  closeReason
+                    ? `PRIVATE_CALL_GATEWAY_CLOSED:${closeReason}`
+                    : `PRIVATE_CALL_GATEWAY_CLOSED_${closeCode}`,
+                ),
               );
             }
-          } catch {}
-        };
-
-        ws.onerror = () => finishReject(new Error("PRIVATE_CALL_GATEWAY_WS_ERROR"));
-        ws.onclose = (event) => {
-          privateCallGatewayReadyRef.current = false;
-          if (privateCallGatewayHeartbeatRef.current) {
-            clearInterval(privateCallGatewayHeartbeatRef.current);
-            privateCallGatewayHeartbeatRef.current = null;
-          }
-          if (!settled) {
-            const closeReason = String(event?.reason || "").trim();
-            const closeCode = Number(event?.code || 1000);
-            finishReject(
-              new Error(
-                closeReason
-                  ? `PRIVATE_CALL_GATEWAY_CLOSED:${closeReason}`
-                  : `PRIVATE_CALL_GATEWAY_CLOSED_${closeCode}`,
-              ),
-            );
-          }
-        };
-      });
+          };
+        });
+      }
 
       // 3. Join voice via the SFU (which now routes through privateCallGatewayWsRef)
       await voiceSfuRef.current?.join({
@@ -9741,13 +10534,7 @@ export function App() {
       setCallDuration(0);
       setStatus("Voice call connected.");
     } catch (err) {
-      privateCallGatewayReadyRef.current = false;
-      if (privateCallGatewayWsRef.current) {
-        try {
-          privateCallGatewayWsRef.current.close();
-        } catch {}
-        privateCallGatewayWsRef.current = null;
-      }
+      closeDedicatedVoiceGateway("private");
       setOutgoingCall(null);
       const reason = err.message || "VOICE_JOIN_FAILED";
       setStatus(`Voice call failed: ${reason}`);
@@ -9780,17 +10567,7 @@ export function App() {
     await cleanupVoiceRtc().catch(() => {});
     setVoiceSession({ guildId: "", channelId: "" });
 
-    if (privateCallGatewayWsRef.current) {
-      try {
-        privateCallGatewayWsRef.current.close();
-      } catch {}
-      privateCallGatewayWsRef.current = null;
-    }
-    privateCallGatewayReadyRef.current = false;
-    if (privateCallGatewayHeartbeatRef.current) {
-      clearInterval(privateCallGatewayHeartbeatRef.current);
-      privateCallGatewayHeartbeatRef.current = null;
-    }
+    closeDedicatedVoiceGateway("private");
 
     if (statusMessage) {
       setStatus(statusMessage);
@@ -10090,6 +10867,7 @@ export function App() {
             connectedServer.membershipToken,
             { method: "POST" },
           );
+          closeDedicatedVoiceGateway("server");
         } catch (error) {
           const message = `Disconnected locally. Server voice leave failed: ${error.message || "VOICE_LEAVE_FAILED"}`;
           setStatus(message);
@@ -10104,6 +10882,7 @@ export function App() {
             guildId: targetGuildId,
             channelId: targetChannelId,
           });
+          closeDedicatedVoiceGateway("server");
           return;
         } catch {}
       }
@@ -10119,6 +10898,7 @@ export function App() {
             connectedServer.membershipToken,
             { method: "POST" },
           );
+          closeDedicatedVoiceGateway("server");
           return;
         }
         await nodeApi(
@@ -10127,6 +10907,7 @@ export function App() {
           connectedServer.membershipToken,
           { method: "POST" },
         );
+        closeDedicatedVoiceGateway("server");
       } catch (error) {
         const message = `Disconnected locally. Server voice leave failed: ${error.message || "VOICE_LEAVE_FAILED"}`;
         setStatus(message);
@@ -10191,7 +10972,7 @@ export function App() {
     event.preventDefault();
     const pos = getContextMenuPoint(event.clientX, event.clientY, {
       width: 260,
-      height: 220,
+      height: 260,
     });
     setChannelContextMenu(null);
     setCategoryContextMenu(null);
@@ -10470,10 +11251,11 @@ export function App() {
     if (
       badge &&
       typeof badge === "object" &&
-      (badge.bgColor || badge.icon || badge.name)
+      (badge.bgColor || badge.icon || badge.name || badge.imageUrl)
     ) {
       return {
         icon: badge.icon || "🏷️",
+        imageUrl: profileImageUrl(badge.imageUrl || "") || "",
         name: badge.name || String(badge.id || "Badge"),
         bgColor: badge.bgColor || "#3a4f72",
         fgColor: badge.fgColor || "#ffffff",
@@ -10483,6 +11265,7 @@ export function App() {
     if (id === "platform_owner")
       return {
         icon: "👑",
+        imageUrl: "",
         name: "Platform Owner",
         bgColor: "#2d6cdf",
         fgColor: "#ffffff",
@@ -10490,6 +11273,7 @@ export function App() {
     if (id === "platform_admin")
       return {
         icon: "🔨",
+        imageUrl: "",
         name: "Platform Admin",
         bgColor: "#2d6cdf",
         fgColor: "#ffffff",
@@ -10497,6 +11281,7 @@ export function App() {
     if (id === "official")
       return {
         icon: "✓",
+        imageUrl: "",
         name: "OFFICIAL",
         bgColor: "#1292ff",
         fgColor: "#ffffff",
@@ -10504,12 +11289,14 @@ export function App() {
     if (id === "boost")
       return {
         icon: "➕",
+        imageUrl: "",
         name: "Boost",
         bgColor: "#4f7ecf",
         fgColor: "#ffffff",
       };
     return {
       icon: badge?.icon || "🏷️",
+      imageUrl: profileImageUrl(badge?.imageUrl || "") || "",
       name: badge?.name || id || "Badge",
       bgColor: badge?.bgColor || "#3a4f72",
       fgColor: badge?.fgColor || "#ffffff",
@@ -11362,6 +12149,14 @@ export function App() {
     return /^image\//i.test(String(value || ""));
   }
 
+  function isVideoMimeType(value = "") {
+    return /^video\//i.test(String(value || ""));
+  }
+
+  function isAudioMimeType(value = "") {
+    return /^audio\//i.test(String(value || ""));
+  }
+
   function isLikelyImageUrl(value = "") {
     const raw = String(value || "").trim();
     if (!raw) return false;
@@ -11374,6 +12169,45 @@ export function App() {
     } catch {
       return /\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)(?:[?#]|$)/i.test(raw);
     }
+  }
+
+  function getAssetKindFromUrl(value = "") {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (/^data:image\//i.test(raw)) return "image";
+    if (/^data:video\//i.test(raw)) return "video";
+    if (/^data:audio\//i.test(raw)) return "audio";
+    try {
+      const parsed = new URL(raw);
+      const pathname = parsed.pathname || "";
+      if (/\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)(?:[?#]|$)/i.test(pathname)) {
+        return "image";
+      }
+      if (/\.(mp4|webm|mov|m4v|ogv)(?:[?#]|$)/i.test(pathname)) {
+        return "video";
+      }
+      if (/\.(mp3|wav|ogg|oga|m4a|aac|flac|opus)(?:[?#]|$)/i.test(pathname)) {
+        return "audio";
+      }
+    } catch {
+      if (/\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)(?:[?#]|$)/i.test(raw)) {
+        return "image";
+      }
+      if (/\.(mp4|webm|mov|m4v|ogv)(?:[?#]|$)/i.test(raw)) {
+        return "video";
+      }
+      if (/\.(mp3|wav|ogg|oga|m4a|aac|flac|opus)(?:[?#]|$)/i.test(raw)) {
+        return "audio";
+      }
+    }
+    return "";
+  }
+
+  function getMediaAssetKind({ url = "", contentType = "" } = {}) {
+    if (isImageMimeType(contentType)) return "image";
+    if (isVideoMimeType(contentType)) return "video";
+    if (isAudioMimeType(contentType)) return "audio";
+    return getAssetKindFromUrl(url);
   }
 
   function getLinkPreviewForUrl(value) {
@@ -11399,8 +12233,25 @@ export function App() {
       const key = normalizedLinkKey(rawUrl);
       if (!key || existing.has(key)) continue;
       const preview = getLinkPreviewForUrl(rawUrl);
-      if (!preview) continue;
-      if (!preview.hasMeta && !preview.action) continue;
+      const assetKind = getMediaAssetKind({
+        url: preview?.url || rawUrl,
+        contentType: "",
+      });
+      if (!preview) {
+        if (!assetKind) continue;
+        out.push({
+          url: rawUrl,
+          title: guessFileNameFromUrl(rawUrl) || "Asset",
+          description: "",
+          imageUrl: "",
+          siteName: "",
+          action: null,
+          kind: assetKind,
+          invite: null,
+        });
+        continue;
+      }
+      if (!preview.hasMeta && !preview.action && !assetKind) continue;
       out.push({
         url: preview.url || rawUrl,
         title: preview.title || preview.siteName || "Link",
@@ -11408,11 +12259,23 @@ export function App() {
         imageUrl: preview.imageUrl || "",
         siteName: preview.siteName || "",
         action: preview.action || null,
-        kind: preview.kind || "",
+        kind: preview.kind || assetKind || "",
         invite: preview.invite || null,
       });
     }
     return out;
+  }
+
+  function isAssetOnlyMessageContent(message) {
+    const content = String(message?.content || "").trim();
+    if (!content) return false;
+    const urls = extractHttpUrls(content);
+    if (!urls.length) return false;
+    const nonUrlText = content
+      .replace(/https?:\/\/[^\s<>"'`)\]]+/gi, " ")
+      .trim();
+    if (nonUrlText) return false;
+    return urls.every((url) => !!getAssetKindFromUrl(url));
   }
 
   function onMediaCardKeyDown(event, onOpen) {
@@ -11470,6 +12333,56 @@ export function App() {
       >
         {favourite ? "★" : "☆"}
       </button>
+    );
+  }
+
+  function renderMessageMediaInfo({
+    title = "",
+    subtitle = "",
+    href = "",
+    hrefLabel = "Open original",
+    onAction = null,
+    actionLabel = "Download",
+  } = {}) {
+    if (!title && !subtitle && !href && !onAction) return null;
+    return (
+      <details
+        className="message-inline-media-details"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <summary>Info</summary>
+        <div className="message-inline-media-details-body">
+          {title && <strong>{title}</strong>}
+          {subtitle && <p>{subtitle}</p>}
+          {(href || onAction) && (
+            <div className="message-inline-media-details-actions">
+              {href && (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {hrefLabel}
+                </a>
+              )}
+              {onAction && (
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onAction();
+                  }}
+                >
+                  {actionLabel}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </details>
     );
   }
 
@@ -11566,41 +12479,90 @@ export function App() {
       );
     }
 
-    const imageUrl = String(embed?.imageUrl || preview?.imageUrl || "").trim();
-    const fallbackImageUrl =
-      !imageUrl && isLikelyImageUrl(embed?.url) ? String(embed.url) : "";
-    const resolvedImageUrl = imageUrl || fallbackImageUrl;
-    if (resolvedImageUrl) {
+    const assetUrl = String(embed?.url || preview?.url || "").trim();
+    const assetKind = getMediaAssetKind({
+      url: assetUrl,
+      contentType: "",
+    });
+    if (assetKind === "image" && assetUrl) {
       const favouriteDraft = buildFavouriteMediaDraftFromEmbed({
         ...embed,
-        imageUrl: resolvedImageUrl,
+        imageUrl: assetUrl,
       });
       return (
         <div
           key={key}
-          className="message-media-card-wrap"
+          className="message-media-card-wrap message-inline-asset-wrap"
           onContextMenu={(event) => event.stopPropagation()}
         >
-          <div
-            className="message-image-link-embed message-media-card-surface"
-            role="button"
-            tabIndex={0}
+          <button
+            type="button"
+            className="message-inline-asset-image-button message-media-card-surface"
             onClick={() => openExpandedMediaFromEmbed(embed)}
             onKeyDown={(event) =>
               onMediaCardKeyDown(event, () => openExpandedMediaFromEmbed(embed))
             }
           >
             <img
-              src={resolvedImageUrl}
+              src={assetUrl}
               alt={embed.title || "Image"}
               loading="lazy"
+              className="message-inline-asset-image"
             />
-            <div className="message-image-link-meta">
-              <strong>{embed.title || "Image"}</strong>
-              <p>{embed.url}</p>
-            </div>
-          </div>
+          </button>
           {renderFavouriteMediaButton(favouriteDraft)}
+          {renderMessageMediaInfo({
+            title: embed.title || guessFileNameFromUrl(assetUrl) || "Image",
+            subtitle: embed.url || assetUrl,
+            href: embed.url || assetUrl,
+          })}
+        </div>
+      );
+    }
+
+    if (assetKind === "video" && assetUrl) {
+      return (
+        <div
+          key={key}
+          className="message-media-card-wrap message-inline-asset-wrap"
+          onContextMenu={(event) => event.stopPropagation()}
+        >
+          <video
+            className="message-inline-asset-video"
+            src={assetUrl}
+            controls
+            playsInline
+            preload="metadata"
+            onClick={(event) => event.stopPropagation()}
+          />
+          {renderMessageMediaInfo({
+            title: embed.title || guessFileNameFromUrl(assetUrl) || "Video",
+            subtitle: embed.url || assetUrl,
+            href: embed.url || assetUrl,
+          })}
+        </div>
+      );
+    }
+
+    if (assetKind === "audio" && assetUrl) {
+      return (
+        <div
+          key={key}
+          className="message-media-card-wrap message-inline-asset-wrap"
+          onContextMenu={(event) => event.stopPropagation()}
+        >
+          <audio
+            className="message-inline-asset-audio"
+            src={assetUrl}
+            controls
+            preload="metadata"
+            onClick={(event) => event.stopPropagation()}
+          />
+          {renderMessageMediaInfo({
+            title: embed.title || guessFileNameFromUrl(assetUrl) || "Audio",
+            subtitle: embed.url || assetUrl,
+            href: embed.url || assetUrl,
+          })}
         </div>
       );
     }
@@ -11622,29 +12584,29 @@ export function App() {
   }
 
   function renderMessageAttachmentCard(attachment, key) {
-    const imagePreviewUrl = attachmentPreviewUrlById[attachment?.id] || "";
+    const previewUrl = attachmentPreviewUrlById[attachment?.id] || "";
     const directUrl = String(attachment?.url || "");
-    const directImageUrl = isLikelyImageUrl(directUrl) ? directUrl : "";
-    const imageUrl = imagePreviewUrl || directImageUrl;
-    const isImage =
-      isImageMimeType(attachment?.contentType || "") || Boolean(imageUrl);
+    const assetKind = getMediaAssetKind({
+      url: directUrl,
+      contentType: attachment?.contentType || "",
+    });
+    const mediaUrl = previewUrl || (assetKind ? directUrl : "");
 
-    if (isImage && imageUrl) {
+    if (assetKind === "image" && mediaUrl) {
       const favouriteDraft = buildFavouriteMediaDraftFromAttachment(attachment);
       return (
         <div
           key={key}
-          className="message-media-card-wrap"
+          className="message-media-card-wrap message-inline-asset-wrap"
           title="Right-click image to save"
           onContextMenu={(event) => {
             // Keep native browser image context menu (Save image as...) instead of message menu.
             event.stopPropagation();
           }}
         >
-          <div
-            className="message-image-attachment message-media-card-surface"
-            role="button"
-            tabIndex={0}
+          <button
+            type="button"
+            className="message-inline-asset-image-button message-media-card-surface"
             onClick={() => openExpandedMediaFromAttachment(attachment)}
             onKeyDown={(event) =>
               onMediaCardKeyDown(event, () =>
@@ -11653,16 +12615,65 @@ export function App() {
             }
           >
             <img
-              src={imageUrl}
+              src={mediaUrl}
               alt={attachment?.fileName || "Image attachment"}
               loading="lazy"
+              className="message-inline-asset-image"
             />
-            <div className="message-image-attachment-meta">
-              <strong>{attachment?.fileName || "Image"}</strong>
-              <p>{attachment?.contentType || "image"}</p>
-            </div>
-          </div>
+          </button>
           {renderFavouriteMediaButton(favouriteDraft)}
+          {renderMessageMediaInfo({
+            title: attachment?.fileName || "Image",
+            subtitle: attachment?.contentType || "image",
+            onAction: () => openMessageAttachment(attachment),
+          })}
+        </div>
+      );
+    }
+
+    if (assetKind === "video" && mediaUrl) {
+      return (
+        <div
+          key={key}
+          className="message-media-card-wrap message-inline-asset-wrap"
+          onContextMenu={(event) => event.stopPropagation()}
+        >
+          <video
+            className="message-inline-asset-video"
+            src={mediaUrl}
+            controls
+            playsInline
+            preload="metadata"
+            onClick={(event) => event.stopPropagation()}
+          />
+          {renderMessageMediaInfo({
+            title: attachment?.fileName || "Video",
+            subtitle: attachment?.contentType || "video",
+            onAction: () => openMessageAttachment(attachment),
+          })}
+        </div>
+      );
+    }
+
+    if (assetKind === "audio" && mediaUrl) {
+      return (
+        <div
+          key={key}
+          className="message-media-card-wrap message-inline-asset-wrap"
+          onContextMenu={(event) => event.stopPropagation()}
+        >
+          <audio
+            className="message-inline-asset-audio"
+            src={mediaUrl}
+            controls
+            preload="metadata"
+            onClick={(event) => event.stopPropagation()}
+          />
+          {renderMessageMediaInfo({
+            title: attachment?.fileName || "Audio",
+            subtitle: attachment?.contentType || "audio",
+            onAction: () => openMessageAttachment(attachment),
+          })}
         </div>
       );
     }
@@ -11730,7 +12741,7 @@ export function App() {
   }
 
   function openPreferredDesktopDownload() {
-    const href = preferredDownloadTarget?.href || DOWNLOAD_TARGETS[0]?.href;
+    const href = preferredDownloadTarget?.href || downloadTargets[0]?.href;
     if (!href) return;
     window.open(href, "_blank", "noopener,noreferrer");
   }
@@ -11741,8 +12752,44 @@ export function App() {
     if (closeSettings) setSettingsOpen(false);
   }
 
+  function openServerAdmin(
+    serverId = "",
+    {
+      closeSettings = false,
+      closeAddServer = false,
+      tab = "overview",
+      guildId = "",
+      channelId = "",
+      channelAction = "",
+    } = {},
+  ) {
+    const targetServerId = serverId || activeServerId || "";
+    if (targetServerId) {
+      setActiveServerId(targetServerId);
+      if (targetServerId !== activeServerId) {
+        setActiveGuildId("");
+        setGuildState(null);
+        setMessages([]);
+      }
+    }
+    setServerAdminIntent((current) => ({
+      nonce: current.nonce + 1,
+      serverId: targetServerId,
+      guildId,
+      tab,
+      channelId,
+      channelAction,
+    }));
+    setNavMode("server-admin");
+    if (closeSettings) setSettingsOpen(false);
+    if (closeAddServer) setAddServerModalOpen(false);
+  }
+
   if (routePath === APP_ROUTE_PANEL) {
-    return <AdminApp />;
+    if (typeof window !== "undefined") {
+      window.location.replace(PANEL_APP_URL);
+    }
+    return null;
   }
 
   if (routePath === APP_ROUTE_BLOGS) {
@@ -11786,8 +12833,11 @@ export function App() {
         downloadMenuRef={downloadMenuRef}
         downloadsMenuOpen={downloadsMenuOpen}
         setDownloadsMenuOpen={setDownloadsMenuOpen}
-        downloadTargets={DOWNLOAD_TARGETS}
+        downloadTargets={downloadTargets}
         preferredDownloadTarget={preferredDownloadTarget}
+        mobileDownloadTarget={mobileDownloadTarget}
+        isMobileVisitor={isMobileVisitor}
+        isAndroidVisitor={isAndroidVisitor}
         onOpenApp={openAppEntryRoute}
         onOpenClient={openAppEntryRoute}
         onOpenTerms={() => navigateAppRoute(APP_ROUTE_TERMS)}
@@ -11825,6 +12875,8 @@ export function App() {
       ? "Profile Studio"
       : navMode === "themes"
         ? "Theme Studio"
+      : navMode === "server-admin"
+        ? "Server Admin"
       : navMode === "dms"
         ? "Messages"
         : "Friends";
@@ -11833,6 +12885,8 @@ export function App() {
       ? "Build your profile and creator identity."
       : navMode === "themes"
         ? "Catalogue, creator, and live interface styling."
+      : navMode === "server-admin"
+        ? "Manage servers, permissions, roles, channels, and extensions inline."
       : "Your social hub, DMs, and creator tools.";
   const ownDisplayName =
     profile?.displayName || profile?.username || me?.username || "You";
@@ -11846,6 +12900,20 @@ export function App() {
     {
       fallback: profile?.platformTitle || "OpenCom Member",
       maxLength: 52,
+    },
+  );
+  const ownCompactSecondaryLabel = getSocialSecondaryLabel(
+    {
+      displayName: profile?.displayName || "",
+      username: me?.username || profile?.username || "",
+      name: me?.username || profile?.username || "",
+    },
+    me?.id,
+    {
+      fallback: profile?.platformTitle || "OpenCom Member",
+      // The bottom-left account rail is much tighter than the main profile card,
+      // so clamp the status segment much earlier to avoid layout spill.
+      maxLength: 24,
     },
   );
 
@@ -12213,6 +13281,21 @@ export function App() {
                   <small>Browse the catalogue or build one inline.</small>
                 </span>
               </button>
+              {canAccessServerAdminPanel && (
+                <button
+                  type="button"
+                  className={`social-hub-link ${navMode === "server-admin" ? "active" : ""}`}
+                  onClick={() => openServerAdmin(activeServerId)}
+                >
+                  <span className="social-hub-link-icon" aria-hidden="true">
+                    🛠️
+                  </span>
+                  <span className="social-hub-link-copy">
+                    <strong>Server Admin</strong>
+                    <small>Manage channels, roles, invites, and extensions inline.</small>
+                  </span>
+                </button>
+              )}
             </div>
 
             {profile && (
@@ -12428,7 +13511,7 @@ export function App() {
             })}
             <div className="user-meta">
               <strong>{ownDisplayName}</strong>
-              <span title={ownSecondaryLabel}>{ownSecondaryLabel}</span>
+              <span title={ownSecondaryLabel}>{ownCompactSecondaryLabel}</span>
             </div>
             <select
               className="status-select"
@@ -12779,6 +13862,12 @@ export function App() {
                             {group.messages.map((message) => {
                               const derivedLinkEmbeds =
                                 getDerivedLinkEmbeds(message);
+                              const hideMessageContent =
+                                isAssetOnlyMessageContent(message);
+                              const isPinnedMessage =
+                                activePinnedServerMessages.some(
+                                  (item) => item.id === message.id,
+                                );
                               return (
                                 <div
                                   key={message.id}
@@ -12787,24 +13876,35 @@ export function App() {
                                     openMessageContextMenu(event, {
                                       id: message.id,
                                       kind: "server",
+                                      authorId:
+                                        message.author_id || message.authorId,
                                       author: group.author,
+                                      authorUsername:
+                                        message.authorUsername ||
+                                        group.author,
                                       content: message.content,
+                                      createdAt:
+                                        message.created_at ||
+                                        message.createdAt ||
+                                        "",
+                                      attachments: message.attachments || [],
                                       mine:
                                         (message.author_id ||
                                           message.authorId) === me?.id,
                                     })
                                   }
                                 >
-                                  <div className="message-content-wrap">
-                                    {activePinnedServerMessages.some(
-                                      (item) => item.id === message.id,
-                                    ) && (
-                                      <span className="message-pin-prefix">
-                                        📌 Pinned
-                                      </span>
-                                    )}
-                                    {renderContentWithMentions(message)}
-                                  </div>
+                                  {(!hideMessageContent || isPinnedMessage) && (
+                                    <div className="message-content-wrap">
+                                      {isPinnedMessage && (
+                                        <span className="message-pin-prefix">
+                                          📌 Pinned
+                                        </span>
+                                      )}
+                                      {!hideMessageContent &&
+                                        renderContentWithMentions(message)}
+                                    </div>
+                                  )}
                                   {Array.isArray(message?.embeds) &&
                                     message.embeds.length > 0 && (
                                       <div className="message-embeds">
@@ -13542,6 +14642,12 @@ export function App() {
                           {group.messages.map((message) => {
                             const derivedLinkEmbeds =
                               getDerivedLinkEmbeds(message);
+                            const hideMessageContent =
+                              isAssetOnlyMessageContent(message);
+                            const isPinnedMessage =
+                              activePinnedDmMessages.some(
+                                (item) => item.id === message.id,
+                              );
                             return (
                               <div
                                 key={message.id}
@@ -13550,8 +14656,17 @@ export function App() {
                                   openMessageContextMenu(event, {
                                     id: message.id,
                                     kind: "dm",
+                                    authorId: message.authorId,
                                     author: message.author,
+                                    authorUsername:
+                                      message.authorUsername || message.author,
                                     content: message.content,
+                                    createdAt:
+                                      message.createdAt ||
+                                      message.created_at ||
+                                      "",
+                                    attachments: message.attachments || [],
+                                    threadId: activeDm?.id || "",
                                     mine: message.authorId === me?.id,
                                   })
                                 }
@@ -13565,16 +14680,17 @@ export function App() {
                                     callerName={group.author}
                                   />
                                 ) : (
-                                  <div className="message-content-wrap">
-                                    {activePinnedDmMessages.some(
-                                      (item) => item.id === message.id,
-                                    ) && (
-                                      <span className="message-pin-prefix">
-                                        📌 Pinned
-                                      </span>
-                                    )}
-                                    {renderContentWithMentions(message)}
-                                  </div>
+                                  (!hideMessageContent || isPinnedMessage) && (
+                                    <div className="message-content-wrap">
+                                      {isPinnedMessage && (
+                                        <span className="message-pin-prefix">
+                                          📌 Pinned
+                                        </span>
+                                      )}
+                                      {!hideMessageContent &&
+                                        renderContentWithMentions(message)}
+                                    </div>
+                                  )
                                 )}
                                 {derivedLinkEmbeds.length > 0 && (
                                   <div className="message-embeds">
@@ -13865,6 +14981,29 @@ export function App() {
           />
         )}
 
+        {navMode === "server-admin" && (
+          <ServerAdminApp
+            embedded
+            preferredServerId={serverAdminIntent.serverId || activeServerId}
+            preferredGuildId={serverAdminIntent.guildId}
+            preferredTab={serverAdminIntent.tab}
+            preferredChannelId={serverAdminIntent.channelId}
+            preferredChannelAction={serverAdminIntent.channelAction}
+            intentNonce={serverAdminIntent.nonce}
+            onSelectServer={(serverId) => {
+              setActiveServerId(serverId);
+              setServerAdminIntent((current) => ({
+                ...current,
+                serverId,
+              }));
+              setActiveGuildId("");
+              setGuildState(null);
+              setMessages([]);
+            }}
+            onExit={() => setNavMode(activeServerId ? "servers" : "friends")}
+          />
+        )}
+
         {navMode === "themes" && (
           <ThemeStudioApp
             activeTab={themeStudioTab}
@@ -13881,6 +15020,7 @@ export function App() {
         addMessageReaction={promptAddReactionToMessage}
         setReplyTarget={setReplyTarget}
         setDmReplyTarget={setDmReplyTarget}
+        reportMessage={reportMessage}
         setMessageContextMenu={setMessageContextMenu}
         togglePinMessage={togglePinMessage}
         setStatus={setStatus}
@@ -13911,6 +15051,8 @@ export function App() {
         setMemberContextMenu={setMemberContextMenu}
         serverContextMenu={serverContextMenu}
         openServerFromContext={openServerFromContext}
+        canAccessServerAdminPanel={canAccessServerAdminPanel}
+        openServerAdmin={openServerAdmin}
         canManageServer={canManageServer}
         activeServerId={activeServerId}
         workingGuildId={workingGuildId}
@@ -13937,7 +15079,9 @@ export function App() {
         addServerTab={addServerTab}
         setAddServerTab={setAddServerTab}
         canAccessServerAdminPanel={canAccessServerAdminPanel}
-        resolveStaticPageHref={resolveStaticPageHref}
+        onOpenServerAdmin={() =>
+          openServerAdmin(activeServerId, { closeAddServer: true })
+        }
         joinInviteCode={joinInviteCode}
         setJoinInviteCode={setJoinInviteCode}
         previewInvite={previewInvite}
@@ -13950,6 +15094,8 @@ export function App() {
         setNewServerBaseUrl={setNewServerBaseUrl}
         newServerLogoUrl={newServerLogoUrl}
         setNewServerLogoUrl={setNewServerLogoUrl}
+        newServerTeamSpeakBridge={newServerTeamSpeakBridge}
+        setNewServerTeamSpeakBridge={setNewServerTeamSpeakBridge}
         onImageFieldUpload={onImageFieldUpload}
         newServerBannerUrl={newServerBannerUrl}
         setNewServerBannerUrl={setNewServerBannerUrl}
@@ -14102,7 +15248,9 @@ export function App() {
         }}
         canModerateMembers={canModerateMembers}
         canAccessServerAdminPanel={canAccessServerAdminPanel}
-        resolveStaticPageHref={resolveStaticPageHref}
+        onOpenServerAdmin={() =>
+          openServerAdmin(activeServerId, { closeSettings: true })
+        }
         logout={logout}
       >
         {settingsTab === "profile" && (
@@ -14111,11 +15259,13 @@ export function App() {
             setProfileForm={setProfileForm}
             onAvatarUpload={onAvatarUpload}
             onBannerUpload={onBannerUpload}
+            onAudioFieldUpload={onAudioFieldUpload}
             saveProfile={saveProfile}
+            testNotificationSound={testNotificationSound}
             isDesktopRuntime={isDesktopRuntime}
             openPreferredDesktopDownload={openPreferredDesktopDownload}
             preferredDownloadTarget={preferredDownloadTarget}
-            downloadTargets={DOWNLOAD_TARGETS}
+            downloadTargets={downloadTargets}
             onOpenProfileStudio={() => {
               setSettingsOpen(false);
               setNavMode("profile");
@@ -14147,7 +15297,7 @@ export function App() {
               newServerBaseUrl,
               newServerLogoUrl,
               newServerBannerUrl,
-              newWorkspaceName,
+              newServerTeamSpeakBridge,
               newChannelName,
               newChannelType,
               newChannelParentId,
@@ -14162,10 +15312,9 @@ export function App() {
               setNewServerBaseUrl,
               setNewServerLogoUrl,
               setNewServerBannerUrl,
+              setNewServerTeamSpeakBridge,
               createServer,
               updateActiveServerVoiceGatewayPref,
-              setNewWorkspaceName,
-              createWorkspace,
               setNewChannelName,
               setNewChannelType,
               setNewChannelParentId,
@@ -14372,4 +15521,5 @@ export function App() {
       </SettingsOverlay>
     </div>
   );
+
 }

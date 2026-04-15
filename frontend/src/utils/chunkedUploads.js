@@ -1,7 +1,13 @@
 const FALLBACK_CHUNK_BYTES = 5 * 1024 * 1024;
+const MIN_CHUNK_BYTES = 64 * 1024;
 
 async function parseJson(response) {
   return response.json().catch(() => ({}));
+}
+
+function normalizeUploadedBytes(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function buildUploadError(response, payload) {
@@ -38,6 +44,7 @@ export async function uploadFileInChunks({
   headers,
   initBody,
   onProgress,
+  signal,
 }) {
   if (!file) return null;
 
@@ -49,6 +56,7 @@ export async function uploadFileInChunks({
         ...headers,
         "Content-Type": "application/json",
       },
+      signal,
       body: JSON.stringify({
         ...initBody,
         fileName: file.name || "upload.bin",
@@ -60,7 +68,7 @@ export async function uploadFileInChunks({
     const totalBytes = Number(file.size || 0);
     let offset = Number(session?.uploadedBytes || 0);
     const chunkSizeBytes = Math.max(
-      64 * 1024,
+      MIN_CHUNK_BYTES,
       Math.min(
         Number(session?.chunkSizeBytes || FALLBACK_CHUNK_BYTES),
         FALLBACK_CHUNK_BYTES,
@@ -76,24 +84,28 @@ export async function uploadFileInChunks({
           ...headers,
           "Content-Type": "application/octet-stream",
         },
+        signal,
         body: chunk,
       });
       const payload = await parseJson(response);
 
       if (!response.ok) {
-        if (
-          response.status === 409 &&
-          Number.isFinite(Number(payload?.uploadedBytes))
-        ) {
-          offset = Number(payload.uploadedBytes);
+        const uploadedBytes = normalizeUploadedBytes(payload?.uploadedBytes);
+        if (response.status === 409 && uploadedBytes !== null) {
+          if (uploadedBytes <= offset) {
+            throw new Error("UPLOAD_OFFSET_STALE");
+          }
+          offset = uploadedBytes;
           continue;
         }
         throw buildUploadError(response, payload);
       }
 
-      offset = Number.isFinite(Number(payload?.uploadedBytes))
-        ? Number(payload.uploadedBytes)
-        : nextOffset;
+      const uploadedBytes = normalizeUploadedBytes(payload?.uploadedBytes);
+      offset = uploadedBytes !== null ? uploadedBytes : nextOffset;
+      if (offset < nextOffset) {
+        throw new Error("UPLOAD_PROGRESS_STALE");
+      }
       if (typeof onProgress === "function") {
         onProgress({
           uploadedBytes: offset,
@@ -109,6 +121,7 @@ export async function uploadFileInChunks({
       headers: {
         ...headers,
       },
+      signal,
     });
     if (typeof onProgress === "function") {
       onProgress({
@@ -127,6 +140,7 @@ export async function uploadFileInChunks({
         headers: {
           ...headers,
         },
+        signal,
       }).catch(() => {});
     }
     throw error;

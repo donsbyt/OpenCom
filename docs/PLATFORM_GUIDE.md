@@ -1,9 +1,14 @@
 # OpenCom Platform Guide
 
+**[NOTICE] AI WRITTEN DOCUMENTATION THIS IS GOING TO BE REWRITTEN AND IS ONLY TEMPORARY TO HAVE SOMETHING HERE MY APPOLOGIES**
+
 This guide is the canonical overview of functionality across:
 
 - Web client (`frontend`)
 - Desktop client (`client`)
+- Android client (`mobile/opencom-android`)
+- Admin panel (`panel`)
+- Support portal (`support`)
 - Core API (`backend/packages/core`)
 - Server Node API (`backend/packages/server-node`)
 
@@ -30,6 +35,12 @@ It is intended to be inclusive of current platform behavior in this repository.
 - Desktop client:
   - Thin Electron shell that hosts the web client
   - Local RPC bridge for rich presence integration from local apps
+- Android client:
+  - Mobile-facing OpenCom client built with Expo/React Native
+- Admin panel:
+  - Separate operational UI for platform administration
+- Support portal:
+  - Public ticket creation/tracking plus staff-side support handling
 
 ## Web Client Feature Set
 
@@ -82,6 +93,23 @@ It is intended to be inclusive of current platform behavior in this repository.
     - `POST /rpc/activity`
     - `DELETE /rpc/activity`
   - Uses logged-in desktop session auth context (local apps do not need OpenCom tokens)
+
+## Android Client Feature Set
+
+- Mobile authentication and session handling
+- Server and DM navigation
+- Channel and chat screens
+- Mobile-focused API/session wrappers
+- Android build and crash-capture helper scripts in the package
+
+## Admin And Support Surfaces
+
+- Admin panel:
+  - Separate Vite app in `panel`
+  - Intended for platform administration workflows
+- Support portal:
+  - Separate Node-served app in `support`
+  - Supports public ticket flows and staff/admin ticket handling
 
 ## Core API Surface (`/v1`)
 

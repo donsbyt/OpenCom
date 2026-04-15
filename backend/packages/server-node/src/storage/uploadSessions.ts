@@ -63,7 +63,7 @@ export function createUploadSession(input: CreateUploadSessionInput): UploadSess
   };
 
   fs.writeFileSync(buildPath(input.rootDir, [tempObjectKey]), "");
-  fs.writeFileSync(sessionMetaPath(sessionDir, uploadId), JSON.stringify(session), "utf8");
+  writeJsonFileAtomic(sessionMetaPath(sessionDir, uploadId), session);
   return session;
 }
 
@@ -182,11 +182,7 @@ function persistUploadSession(rootDir: string, session: UploadSession) {
     ...session,
     uploadedBytes: getUploadSize(rootDir, session.tempObjectKey)
   };
-  fs.writeFileSync(
-    sessionMetaPath(sessionDir, session.uploadId),
-    JSON.stringify(nextSession),
-    "utf8"
-  );
+  writeJsonFileAtomic(sessionMetaPath(sessionDir, session.uploadId), nextSession);
 }
 
 function normalizeChunkSize(chunkSizeBytes?: number) {
@@ -226,6 +222,12 @@ function unlinkIfExists(filePath: string) {
   try {
     fs.unlinkSync(filePath);
   } catch {}
+}
+
+function writeJsonFileAtomic(filePath: string, value: unknown) {
+  const tempPath = `${filePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(value), "utf8");
+  fs.renameSync(tempPath, filePath);
 }
 
 function streamChunkToFile(

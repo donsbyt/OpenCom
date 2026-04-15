@@ -116,6 +116,11 @@ function normalizeIceServer(server) {
   return normalized;
 }
 
+function normalizeIceServerList(iceServers) {
+  if (!Array.isArray(iceServers)) return [];
+  return iceServers.map((entry) => normalizeIceServer(entry)).filter(Boolean);
+}
+
 function parseIceServersConfig(rawValue) {
   if (typeof rawValue !== "string") {
     return { explicit: false, iceServers: [], error: null };
@@ -226,6 +231,7 @@ export function createSfuVoiceClient({
     userAudioPrefsByUserId: new Map(),
     selfMonitorAudio: null,
     selfMonitorActive: false,
+    joinedIceServers: [],
   };
 
   function resolveIceConfiguration() {
@@ -240,9 +246,12 @@ export function createSfuVoiceClient({
         error: parsedIceServers.error.message,
       });
     }
+    const defaultIceServers = state.joinedIceServers.length
+      ? state.joinedIceServers
+      : DEFAULT_VOICE_ICE_SERVERS;
     const iceServers =
       parsedIceServers.error || !parsedIceServers.explicit
-        ? cloneIceServers(DEFAULT_VOICE_ICE_SERVERS)
+        ? cloneIceServers(defaultIceServers)
         : cloneIceServers(parsedIceServers.iceServers);
 
     const transportPolicyValue = readVoiceConfigValue(
@@ -263,7 +272,9 @@ export function createSfuVoiceClient({
       iceServers,
       iceServerSource: parsedIceServers.explicit
         ? iceServersValue.source
-        : "default-stun",
+        : state.joinedIceServers.length
+          ? "server"
+          : "default-stun",
       iceTransportPolicy:
         iceTransportPolicy && iceTransportPolicy !== "all"
           ? iceTransportPolicy
@@ -1365,7 +1376,11 @@ export function createSfuVoiceClient({
       guildId,
       channelId,
       producerCount: (joined.producers || []).length,
+      joinedIceServerCount: Array.isArray(joined.iceServers)
+        ? joined.iceServers.length
+        : 0,
     });
+    state.joinedIceServers = normalizeIceServerList(joined.iceServers);
     state.device = new mediasoupClient.Device();
     await state.device.load({ routerRtpCapabilities: joined.rtpCapabilities });
 
@@ -1727,6 +1742,7 @@ export function createSfuVoiceClient({
     } catch {}
     state.recvTransport = null;
     state.device = null;
+    state.joinedIceServers = [];
     state.guildId = "";
     state.channelId = "";
   }

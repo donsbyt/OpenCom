@@ -1,19 +1,23 @@
 # OpenCom Documentation
 
-This directory now contains a static docs portal at `docs/site` with:
+This directory contains the Markdown source documents for contributor-facing docs and a static docs portal at `docs/site`.
+
+## What is here
 
 - API documentation (Core + Server Node)
 - Extension SDK docs
-- General usage and feature guides
-- Operations and reliability notes
+- setup and contributor guides
+- platform behavior and capability references
 
-Canonical markdown guide for current platform features/endpoints:
+Primary Markdown references:
 
+- `README.md`
+- `CONTRIBUTING.md`
+- `docs/SETUP_GUIDE.md`
 - `docs/PLATFORM_GUIDE.md`
+- `docs/extensions-sdk.md`
 
 ## Local preview
-
-From repo root:
 
 ```bash
 ./scripts/docs/serve.sh
@@ -21,7 +25,7 @@ From repo root:
 
 Then open `http://localhost:4173`.
 
-Optional docs utilities:
+Helpful utilities:
 
 ```bash
 ./scripts/docs/check-links.sh
@@ -53,7 +57,7 @@ Serve the `docs/site` directory directly as static files.
 
 ## Editing docs
 
-Update pages in `docs/site/*.html`.
+When possible, update the Markdown source documents first and then bring `docs/site/*.html` in line if the static portal needs the same information.
 
 Main pages:
 

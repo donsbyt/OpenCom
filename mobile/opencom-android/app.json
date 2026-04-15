@@ -3,15 +3,16 @@
     "name": "OpenCom",
     "slug": "opencom-android",
     "version": "0.1.0",
-    "newArchEnabled": false,
     "orientation": "portrait",
     "scheme": "opencom",
     "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
     "android": {
       "package": "online.opencom.mobile",
-      "compileSdkVersion": 36,
-      "targetSdkVersion": 36,
-      "minSdkVersion": 24,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#0a1120"
+      },
       "permissions": [
         "POST_NOTIFICATIONS"
       ],
@@ -33,6 +34,16 @@
               "scheme": "https",
               "host": "www.opencom.online",
               "pathPrefix": "/join/"
+            },
+            {
+              "scheme": "https",
+              "host": "opencom.online",
+              "pathPrefix": "/gift/"
+            },
+            {
+              "scheme": "https",
+              "host": "www.opencom.online",
+              "pathPrefix": "/gift/"
             }
           ]
         }
@@ -40,6 +51,32 @@
     },
     "extra": {
       "opencomCoreApiUrl": "https://api.opencom.online"
+    },
+    "plugins": [
+      "expo-asset",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "minSdkVersion": 24
+          }
+        }
+      ]
+    ],
+    "ios": {
+      "bundleIdentifier": "online.opencom.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
+      }
+    },
+    "notification": {
+      "icon": "./assets/icon.png",
+      "color": "#7386ff"
     }
   }
 }

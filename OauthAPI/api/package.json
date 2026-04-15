@@ -1,0 +1,26 @@
+{
+  "name": "api",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.0",
+    "@fastify/rate-limit": "^10.0.0",
+    "argon2": "^0.44.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.0.0",
+    "mysql2": "^3.11.0",
+    "zed": "^0.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,5 +1,15 @@
+import { Platform } from "react-native";
+import {
+  normalizeAuthTokens,
+  runSingleFlightAccessTokenRefresh,
+  runSingleFlightMembershipTokenRefresh,
+  withBearerAuthorization,
+} from "./authSession";
 import type {
   AuthTokens,
+  BoostGift,
+  BoostGiftPreview,
+  BoostStatus,
   ChannelMessagesResponse,
   CoreServer,
   CoreServersResponse,
@@ -16,6 +26,7 @@ import type {
   PrivateCallStatusResult,
   Role,
   UserStatus,
+  VoiceMediaSessionResult,
   VoiceState,
 } from "./types";
 
@@ -43,9 +54,10 @@ export function createApiClient(input: {
     retry = true,
   ): Promise<T> {
     const tokens = input.getTokens();
-    const headers = new Headers(options.headers || {});
-    if (tokens?.accessToken)
-      headers.set("Authorization", `Bearer ${tokens.accessToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      tokens?.accessToken,
+    );
     if (options.body !== undefined)
       headers.set("Content-Type", "application/json");
 
@@ -71,8 +83,10 @@ export function createApiClient(input: {
     options: RequestOptions = {},
     retry = true,
   ): Promise<T> {
-    const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${server.membershipToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      server.membershipToken,
+    );
     if (options.body !== undefined)
       headers.set("Content-Type", "application/json");
 
@@ -104,8 +118,10 @@ export function createApiClient(input: {
     options: RequestOptions & { rawBody?: FormData } = {},
     retry = true,
   ): Promise<Response> {
-    const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${server.membershipToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      server.membershipToken,
+    );
 
     const response = await fetch(
       `${server.baseUrl.replace(/\/$/, "")}${path}`,
@@ -133,9 +149,10 @@ export function createApiClient(input: {
     retry = true,
   ): Promise<Response> {
     const tokens = input.getTokens();
-    const headers = new Headers(options.headers || {});
-    if (tokens?.accessToken)
-      headers.set("Authorization", `Bearer ${tokens.accessToken}`);
+    const headers = withBearerAuthorization(
+      new Headers(options.headers || {}),
+      tokens?.accessToken,
+    );
 
     const response = await fetch(`${coreBase}${path}`, {
       method: options.method || "POST",
@@ -152,45 +169,51 @@ export function createApiClient(input: {
   }
 
   async function refreshAccessToken(): Promise<AuthTokens | null> {
-    const tokens = input.getTokens();
-    if (!tokens?.refreshToken) return null;
+    return runSingleFlightAccessTokenRefresh(async () => {
+      const tokens = input.getTokens();
+      if (!tokens?.refreshToken) return null;
 
-    const response = await fetch(`${coreBase}/v1/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+      const response = await fetch(`${coreBase}/v1/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+      });
+      if (!response.ok) {
+        await input.setTokens(null);
+        return null;
+      }
+
+      const data = (await response.json()) as {
+        accessToken?: string;
+        refreshToken?: string;
+      };
+      const next = normalizeAuthTokens({
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
+      });
+      if (!next) {
+        await input.setTokens(null);
+        return null;
+      }
+
+      await input.setTokens(next);
+      return next;
     });
-    if (!response.ok) {
-      await input.setTokens(null);
-      return null;
-    }
-
-    const data = (await response.json()) as {
-      accessToken?: string;
-      refreshToken?: string;
-    };
-    if (!data.accessToken || !data.refreshToken) {
-      await input.setTokens(null);
-      return null;
-    }
-    const next = {
-      accessToken: data.accessToken,
-      refreshToken: data.refreshToken,
-    };
-    await input.setTokens(next);
-    return next;
   }
 
   async function refreshMembershipToken(
     serverId: string,
   ): Promise<string | null> {
-    const response = await coreRequest<{ membershipToken: string }>(
-      `/v1/servers/${encodeURIComponent(serverId)}/membership-token`,
-      { method: "POST" },
-    );
-    if (!response.membershipToken) return null;
-    input.updateServerMembershipToken(serverId, response.membershipToken);
-    return response.membershipToken;
+    return runSingleFlightMembershipTokenRefresh(serverId, async () => {
+      const response = await coreRequest<{ membershipToken: string }>(
+        `/v1/servers/${encodeURIComponent(serverId)}/membership-token`,
+        { method: "POST" },
+      );
+      const membershipToken = String(response.membershipToken || "").trim();
+      if (!membershipToken) return null;
+      input.updateServerMembershipToken(serverId, membershipToken);
+      return membershipToken;
+    });
   }
 
   return {
@@ -247,13 +270,15 @@ export function createApiClient(input: {
     async uploadProfileImage(
       uri: string,
       fieldName: "pfp" | "banner",
+      options?: { filename?: string; mimeType?: string | null },
     ): Promise<{ url: string }> {
       const formData = new FormData();
-      const filename = uri.split("/").pop() || "upload.jpg";
+      const filename =
+        options?.filename || uri.split("/").pop() || `${fieldName}.jpg`;
       (formData as any).append("file", {
         uri,
         name: filename,
-        type: "image/jpeg",
+        type: options?.mimeType || "image/jpeg",
       });
       const response = await coreRequestRaw(
         `/v1/me/profile/${fieldName}`,
@@ -263,7 +288,14 @@ export function createApiClient(input: {
         },
       );
       if (!response.ok) throw new Error(await response.text());
-      return response.json();
+      const data = (await response.json()) as {
+        url?: string;
+        pfpUrl?: string;
+        bannerUrl?: string;
+      };
+      const url = data.url || data.pfpUrl || data.bannerUrl || "";
+      if (!url) throw new Error("UPLOAD_FAILED");
+      return { url };
     },
 
     // ─── Presence / Status ────────────────────────────────────────────────────
@@ -509,7 +541,15 @@ export function createApiClient(input: {
         { method: "POST", rawBody: formData },
       );
       if (!response.ok) throw new Error(await response.text());
-      return response.json();
+      const data = (await response.json()) as {
+        id?: string;
+        attachmentId?: string;
+        url?: string;
+      };
+      return {
+        id: data.id || data.attachmentId || "",
+        url: data.url || "",
+      };
     },
 
     // ─── Pinned Messages (server) ─────────────────────────────────────────────
@@ -620,6 +660,14 @@ export function createApiClient(input: {
       );
     },
 
+    getVoiceMediaSession(server: CoreServer, channelId: string) {
+      return nodeRequest<VoiceMediaSessionResult>(
+        server,
+        `/v1/channels/${encodeURIComponent(channelId)}/media-session`,
+        { method: "POST", body: {} },
+      );
+    },
+
     // ─── Invites ──────────────────────────────────────────────────────────────
 
     joinInvite(code: string) {
@@ -673,8 +721,67 @@ export function createApiClient(input: {
     registerPushToken(token: string) {
       return coreRequest<{ ok: boolean }>("/v1/push/register", {
         method: "POST",
-        body: { token, platform: "android" },
+        body: {
+          token,
+          platform: Platform.OS,
+        },
       });
+    },
+
+    // ─── Billing / Boost ─────────────────────────────────────────────────────
+
+    getBoostStatus() {
+      return coreRequest<BoostStatus>("/v1/billing/boost");
+    },
+
+    startBoostCheckout() {
+      return coreRequest<{ url?: string; checkoutUrl?: string }>(
+        "/v1/billing/boost/checkout",
+        {
+          method: "POST",
+          body: {},
+        },
+      );
+    },
+
+    openBoostPortal() {
+      return coreRequest<{ url?: string; portalUrl?: string }>(
+        "/v1/billing/boost/portal",
+        {
+          method: "POST",
+          body: {},
+        },
+      );
+    },
+
+    getBoostGifts() {
+      return coreRequest<{ gifts: BoostGift[] }>("/v1/billing/boost/gifts");
+    },
+
+    startBoostGiftCheckout() {
+      return coreRequest<{ checkoutUrl?: string; url?: string }>(
+        "/v1/billing/boost/gifts/checkout",
+        {
+          method: "POST",
+          body: {},
+        },
+      );
+    },
+
+    previewBoostGift(code: string) {
+      return coreRequest<BoostGiftPreview>(
+        `/v1/billing/boost/gifts/${encodeURIComponent(code)}`,
+      );
+    },
+
+    redeemBoostGift(code: string) {
+      return coreRequest<{ ok?: boolean; grantDays?: number }>(
+        `/v1/billing/boost/gifts/${encodeURIComponent(code)}/redeem`,
+        {
+          method: "POST",
+          body: {},
+        },
+      );
     },
 
     // ─── Social: friends ──────────────────────────────────────────────────────
@@ -856,7 +963,15 @@ export function createApiClient(input: {
         { method: "POST", rawBody: formData },
       );
       if (!response.ok) throw new Error(await response.text());
-      return response.json();
+      const data = (await response.json()) as {
+        id?: string;
+        attachmentId?: string;
+        url?: string;
+      };
+      return {
+        id: data.id || data.attachmentId || "",
+        url: data.url || "",
+      };
     },
 
     // ─── Pinned DM messages ───────────────────────────────────────────────────

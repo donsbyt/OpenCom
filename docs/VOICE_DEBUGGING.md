@@ -1,5 +1,7 @@
 # Voice Debugging + Logging Controls
 
+
+**[NOTICE] AI WRITTEN DOCUMENTATION THIS IS GOING TO BE REWRITTEN AND IS ONLY TEMPORARY TO HAVE SOMETHING HERE MY APPOLOGIES**
 ## Logging controls
 
 ### Backend (`backend/packages/server-node`)
@@ -14,10 +16,17 @@ Warnings/errors are emitted with `!!! WARN` / `!!! ERROR` prefixes and include v
 - `VITE_DEBUG_VOICE=1` or `localStorage.setItem("opencom_debug_voice", "1")` enables verbose SFU/client logs.
 - Logs include gateway readiness checks, transport state transitions, consumer track state, and autoplay failures.
 - The SFU client now attempts ICE restart automatically when a transport becomes `disconnected` or `failed`.
+- By default, ICE servers now come from the server-node during `VOICE_JOIN`.
 - `VITE_VOICE_ICE_SERVERS` accepts a JSON array of `RTCIceServer` entries for STUN/TURN.
 - `VITE_VOICE_ICE_TRANSPORT_POLICY=relay` forces TURN-only relay candidates when needed.
 - `localStorage.setItem("opencom_voice_ice_servers", JSON.stringify([...]))` overrides ICE servers locally for debugging.
 - `localStorage.setItem("opencom_voice_ice_transport_policy", "relay")` forces relay mode locally for debugging.
+
+### Server-node (`backend/packages/server-node`)
+- `VOICE_STUN_URLS` configures default STUN URLs returned to clients.
+- `VOICE_TURN_URLS` configures TURN relay URLs returned to clients.
+- `VOICE_TURN_SECRET` enables coturn-style time-limited credentials generated on the server.
+- `VOICE_TURN_TTL_SECONDS` controls TURN credential lifetime.
 
 Example:
 

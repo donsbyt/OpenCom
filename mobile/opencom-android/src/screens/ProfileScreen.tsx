@@ -16,10 +16,11 @@ import {
 } from "../components/chrome";
 import { useAuth } from "../context/AuthContext";
 import { colors, radii, spacing, typography } from "../theme";
+import { resolveCoreImageUrl } from "../urls";
 
 type ProfileScreenProps = {
   onLogout: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (tab?: string) => void;
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -73,6 +74,7 @@ export function ProfileScreen({
   const bio = myProfile?.bio ?? "";
   const pfpUrl = myProfile?.pfp_url ?? null;
   const bannerUrl = myProfile?.banner_url ?? null;
+  const resolvedBannerUrl = resolveCoreImageUrl(bannerUrl);
   const statusLabel = STATUS_LABELS[selfStatus] ?? STATUS_LABELS.online;
 
   const profileSubtitle = useMemo(() => {
@@ -90,8 +92,12 @@ export function ProfileScreen({
         showsVerticalScrollIndicator={false}
       >
         <SurfaceCard style={styles.heroCard} padded={false}>
-          {bannerUrl ? (
-            <Image source={{ uri: bannerUrl }} style={styles.banner} resizeMode="cover" />
+          {resolvedBannerUrl ? (
+            <Image
+              source={{ uri: resolvedBannerUrl }}
+              style={styles.banner}
+              resizeMode="cover"
+            />
           ) : (
             <View style={styles.bannerPlaceholder} />
           )}
@@ -111,7 +117,7 @@ export function ProfileScreen({
                 styles.heroAction,
                 pressed && styles.heroActionPressed,
               ]}
-              onPress={onOpenSettings}
+              onPress={() => onOpenSettings("profile")}
             >
               <Text style={styles.heroActionText}>Edit Profile</Text>
             </Pressable>
@@ -151,19 +157,31 @@ export function ProfileScreen({
           <ActionRow
             icon="⚙️"
             label="Settings and Profile"
-            onPress={onOpenSettings}
+            onPress={() => onOpenSettings("profile")}
+            showDivider
+          />
+          <ActionRow
+            icon="⚡"
+            label="Boost and Billing"
+            onPress={() => onOpenSettings("billing")}
+            showDivider
+          />
+          <ActionRow
+            icon="🎨"
+            label="Theme and Appearance"
+            onPress={() => onOpenSettings("appearance")}
             showDivider
           />
           <ActionRow
             icon="🔒"
             label="Account and Security"
-            onPress={onOpenSettings}
+            onPress={() => onOpenSettings("account")}
             showDivider
           />
           <ActionRow
             icon="📱"
             label="Sessions and Devices"
-            onPress={onOpenSettings}
+            onPress={() => onOpenSettings("sessions")}
           />
         </SurfaceCard>
 

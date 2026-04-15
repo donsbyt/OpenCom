@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ const repoRoot = path.resolve(__dirname, "../../../../../");
 const GLOBAL_SAMPLE_LIMIT = 2000;
 const ROUTE_SAMPLE_LIMIT = 300;
 const HEAVY_STATS_TTL_MS = 15_000;
+const USER_COUNT_OFFSET_FILE = path.join(os.homedir(), "user.txt");
 
 type RouteMetricState = {
   key: string;
@@ -291,6 +292,19 @@ async function countIfTableExists(tableName: string, sql?: string) {
   );
 }
 
+async function readUserCountOffset() {
+  try {
+    const raw = await fs.readFile(USER_COUNT_OFFSET_FILE, "utf8");
+    const trimmed = raw.trim();
+    if (!trimmed) return 0;
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.trunc(parsed);
+  } catch {
+    return 0;
+  }
+}
+
 async function collectDatabaseStats() {
   const [
     users,
@@ -309,6 +323,12 @@ async function collectDatabaseStats() {
     draftBlogs,
     boostGrantsActive,
     activeInvites,
+    boostBadgeMembers,
+    boostStripeMembers,
+    badgeDefinitions,
+    supportTicketsTotal,
+    supportTicketsOpen,
+    userCountOffset,
   ] = await Promise.all([
     countRows(`SELECT COUNT(*) AS count FROM users`, {}, { fallbackOnMissingTable: true }),
     countRows(`SELECT COUNT(*) AS count FROM account_bans`, {}, { fallbackOnMissingTable: true }),
@@ -350,10 +370,35 @@ async function collectDatabaseStats() {
        FROM invites
        WHERE expires_at IS NULL OR expires_at > NOW()`,
     ),
+    countIfTableExists(
+      "user_badges",
+      `SELECT COUNT(*) AS count
+       FROM user_badges
+       WHERE badge='boost'`,
+    ),
+    countIfTableExists(
+      "user_subscriptions",
+      `SELECT COUNT(DISTINCT user_id) AS count
+       FROM user_subscriptions
+       WHERE status IN ('active','trialing','past_due')`,
+    ),
+    countIfTableExists("badge_definitions"),
+    countIfTableExists("support_tickets"),
+    countIfTableExists(
+      "support_tickets",
+      `SELECT COUNT(*) AS count
+       FROM support_tickets
+       WHERE status IN ('open','waiting_on_staff','waiting_on_user')`,
+    ),
+    readUserCountOffset(),
   ]);
 
+  const usersWithOffset = users + userCountOffset;
+
   return {
-    users,
+    users: usersWithOffset,
+    usersBase: users,
+    usersFileOffset: userCountOffset,
     bannedUsers,
     refreshSessions,
     activeRefreshSessions,
@@ -369,6 +414,11 @@ async function collectDatabaseStats() {
     draftBlogs,
     boostGrantsActive,
     activeInvites,
+    boostBadgeMembers,
+    boostStripeMembers,
+    badgeDefinitions,
+    supportTicketsTotal,
+    supportTicketsOpen,
   };
 }
 
@@ -551,14 +601,145 @@ function buildRuntimeSnapshot() {
   };
 }
 
+function formatDeploymentProvider(value: string | undefined) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  const normalized = trimmed.toLowerCase();
+  if (normalized === "aws" || normalized === "amazon" || normalized === "amazon web services") {
+    return "AWS";
+  }
+  if (normalized === "self-hosted" || normalized === "selfhosted") {
+    return "Self-hosted";
+  }
+  return trimmed
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function inferDeploymentProvider() {
+  const configured = formatDeploymentProvider(env.DEPLOYMENT_PROVIDER);
+  if (configured) return configured;
+
+  const dbHost = String(env.DB_HOST || "").toLowerCase();
+  const endpoint = String(env.S3_ENDPOINT || "").toLowerCase();
+  const gcsProject = String(env.GCS_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || "").toLowerCase();
+  if (
+    dbHost.includes("amazonaws.com") ||
+    endpoint.includes("amazonaws.com") ||
+    process.env.AWS_REGION ||
+    process.env.AWS_DEFAULT_REGION
+  ) {
+    return "AWS";
+  }
+  if (
+    dbHost.includes("googleusercontent.com") ||
+    dbHost.includes("cloudsql") ||
+    env.STORAGE_PROVIDER === "gcs" ||
+    !!gcsProject
+  ) {
+    return "GCP";
+  }
+
+  return "Self-hosted";
+}
+
+function classifyDatabaseProvider(host: string) {
+  const normalizedHost = String(host || "").trim().toLowerCase();
+  if (!normalizedHost) return "MySQL";
+  if (normalizedHost.includes("googleusercontent.com") || normalizedHost.includes("cloudsql")) {
+    return "Cloud SQL";
+  }
+  if (normalizedHost.includes("rds.amazonaws.com")) return "Amazon RDS";
+  if (normalizedHost.includes("amazonaws.com")) return "AWS-managed MySQL";
+  return "MySQL";
+}
+
+function classifyStorageProvider() {
+  if (env.STORAGE_PROVIDER === "gcs") return "Google Cloud Storage";
+  if (env.STORAGE_PROVIDER !== "s3") return "Local filesystem";
+  if (String(env.S3_ENDPOINT || "").toLowerCase().includes("amazonaws.com")) {
+    return "Amazon S3";
+  }
+  return "S3-compatible object storage";
+}
+
+function inferComputeClass(provider: string) {
+  const configured = String(env.DEPLOYMENT_COMPUTE_CLASS || "").trim();
+  if (configured) return configured.toUpperCase();
+  if (provider === "AWS") return "EC2";
+  return "VM";
+}
+
+function inferOperatingSystem() {
+  const configured = String(env.DEPLOYMENT_OS_NAME || "").trim();
+  if (configured) return configured;
+
+  try {
+    const raw = readFileSync("/etc/os-release", "utf8");
+    const match = raw.match(/^PRETTY_NAME="?([^"\n]+)"?/m);
+    if (match?.[1]) return match[1].trim();
+  } catch {
+    // Fall back to runtime platform metadata below.
+  }
+
+  const version = String(typeof os.version === "function" ? os.version() : "").trim();
+  if (version) return version;
+
+  const platform = String(os.platform() || "linux").trim();
+  return platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : "Linux";
+}
+
+function buildInfrastructureSnapshot() {
+  const provider = inferDeploymentProvider();
+  const computeClass = inferComputeClass(provider);
+  const operatingSystem = inferOperatingSystem();
+  const region =
+    env.DEPLOYMENT_REGION ||
+    env.S3_REGION ||
+    process.env.AWS_REGION ||
+    process.env.AWS_DEFAULT_REGION ||
+    null;
+  const databaseProvider = classifyDatabaseProvider(env.DB_HOST);
+  const storageProvider = classifyStorageProvider();
+
+  return {
+    provider,
+    computeClass,
+    region,
+    stackName: env.DEPLOYMENT_STACK_NAME || null,
+    environment: env.NODE_ENV,
+    operatingSystem,
+    appBaseUrl: env.APP_BASE_URL,
+    supportBaseUrl: env.SUPPORT_BASE_URL,
+    runtimeHost: os.hostname(),
+    database: {
+      provider: databaseProvider,
+      host: env.DB_HOST,
+      port: env.DB_PORT,
+      name: env.DB_NAME,
+    },
+    storage: {
+      provider: storageProvider,
+      mode: env.STORAGE_PROVIDER,
+      bucket: env.STORAGE_PROVIDER === "local" ? null : env.CORE_STORAGE_BUCKET || env.CORE_S3_BUCKET || null,
+      region: env.S3_REGION || region,
+      endpoint: env.S3_ENDPOINT || null,
+    },
+  };
+}
+
 export async function getAdminStatsSnapshot() {
   const heavy = await getHeavyStats();
   const runtime = buildRuntimeSnapshot();
   const requests = buildRequestStatsSnapshot();
+  const infrastructure = buildInfrastructureSnapshot();
 
   return {
     generatedAt: new Date().toISOString(),
     ...runtime,
+    infrastructure,
     requests,
     database: heavy.database,
     storage: heavy.storage,

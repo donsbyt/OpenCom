@@ -5,6 +5,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Linking,
   Modal,
   Pressable,
@@ -53,7 +54,7 @@ import type {
   Friend,
   Guild,
 } from "./src/types";
-import { colors } from "./src/theme";
+import { ThemeProvider, colors, useTheme } from "./src/theme";
 
 // ─── Navigator instances ──────────────────────────────────────────────────────
 
@@ -151,8 +152,8 @@ function TabProfile({ navigation }: { navigation: any }) {
     await setTokens(null);
   }, [setTokens]);
 
-  const onOpenSettings = useCallback(() => {
-    navigation.navigate("Settings");
+  const onOpenSettings = useCallback((tab?: string) => {
+    navigation.navigate("Settings", tab ? { tab } : undefined);
   }, [navigation]);
 
   return <ProfileScreen onLogout={onLogout} onOpenSettings={onOpenSettings} />;
@@ -292,10 +293,9 @@ function DmChatScreenWrapper({
         const joined = await api.joinPrivateCall(created.call_id);
         if (
           !joined.success ||
-          !joined.membershipToken ||
-          !joined.nodeBaseUrl ||
           !joined.guildId ||
-          !joined.channelId
+          !joined.channelId ||
+          (!joined.mediaToken && !joined.membershipToken)
         ) {
           throw new Error("CALL_JOIN_FAILED");
         }
@@ -304,8 +304,11 @@ function DmChatScreenWrapper({
           mode: "private",
           callId: created.call_id,
           participantName: targetThread.name,
-          membershipToken: joined.membershipToken,
-          nodeBaseUrl: joined.nodeBaseUrl,
+          mediaToken: joined.mediaToken ?? null,
+          mediaWsUrl: joined.mediaWsUrl ?? null,
+          membershipToken: joined.membershipToken ?? null,
+          nodeBaseUrl: joined.nodeBaseUrl ?? null,
+          roomId: joined.roomId ?? null,
           guild: {
             id: joined.guildId,
             name: "Private Calls",
@@ -422,14 +425,27 @@ function MembersScreenWrapper({
   );
 }
 
-function SettingsScreenWrapper({ navigation }: { navigation: any }) {
+function SettingsScreenWrapper({
+  route,
+  navigation,
+}: {
+  route: any;
+  navigation: any;
+}) {
   const { setTokens } = useAuth();
+  const params = route?.params || {};
 
   const onLogout = useCallback(async () => {
     await setTokens(null);
   }, [setTokens]);
 
-  return <SettingsScreen onLogout={onLogout} />;
+  return (
+    <SettingsScreen
+      onLogout={onLogout}
+      initialTab={params.tab}
+      initialGiftCode={params.giftCode}
+    />
+  );
 }
 
 function VoiceRoomScreenWrapper({
@@ -444,8 +460,11 @@ function VoiceRoomScreenWrapper({
     guild,
     channel,
     mode,
+    mediaToken,
+    mediaWsUrl,
     membershipToken,
     nodeBaseUrl,
+    roomId,
     callId,
     participantName,
   } = route.params as {
@@ -453,8 +472,11 @@ function VoiceRoomScreenWrapper({
     guild: Guild;
     channel: Channel;
     mode?: "server" | "private";
+    mediaToken?: string | null;
+    mediaWsUrl?: string | null;
     membershipToken?: string | null;
     nodeBaseUrl?: string | null;
+    roomId?: string | null;
     callId?: string;
     participantName?: string | null;
   };
@@ -465,8 +487,11 @@ function VoiceRoomScreenWrapper({
       guild={guild}
       channel={channel}
       mode={mode}
+      mediaToken={mediaToken}
+      mediaWsUrl={mediaWsUrl}
       membershipToken={membershipToken}
       nodeBaseUrl={nodeBaseUrl}
+      roomId={roomId}
       callId={callId}
       participantName={participantName}
       onBack={() => navigation.goBack()}
@@ -477,11 +502,12 @@ function VoiceRoomScreenWrapper({
 // ─── Main stack navigator ─────────────────────────────────────────────────────
 
 function MainNavigator() {
+  const { theme } = useTheme();
   return (
     <MainStack.Navigator
       screenOptions={{
         headerShown: false,
-        contentStyle: { backgroundColor: colors.background },
+        contentStyle: { backgroundColor: theme.colors.background },
       }}
     >
       <MainStack.Screen name="Tabs" component={MainTabs} />
@@ -527,6 +553,8 @@ function MainNavigator() {
 // ─── Gateway-wired app content ────────────────────────────────────────────────
 
 function AppContent() {
+  const { theme } = useTheme();
+  const colors = theme.colors;
   const {
     tokens,
     setTokens,
@@ -535,6 +563,7 @@ function AppContent() {
     servers,
     refreshServers,
     refreshMyProfile,
+    refreshDmThreads,
     api,
     coreApiUrl,
     selfStatus,
@@ -559,6 +588,9 @@ function AppContent() {
   const navigationRef = useRef<any>(null);
   const pendingDeepLinkRef = useRef<DeepLinkTarget | null>(null);
   const coreGatewayRef = useRef<CoreGatewayController | null>(null);
+  const appStateRef = useRef(AppState.currentState);
+  const lastBackgroundedAtRef = useRef<number | null>(null);
+  const foregroundSyncRef = useRef<Promise<void> | null>(null);
 
   const getApiErrorCode = useCallback((error: unknown) => {
     const raw = error instanceof Error ? error.message : String(error || "");
@@ -587,10 +619,10 @@ function AppContent() {
         dmThreads.find((item) => item.id === normalizedThreadId) || null;
 
       if (!thread) {
-        const data = await api.getDms().catch(() => null);
-        const nextThreads = data?.dms ?? [];
+        const nextThreads = await refreshDmThreads({ force: true }).catch(
+          () => [],
+        );
         if (nextThreads.length) {
-          setDmThreads(nextThreads);
           thread =
             nextThreads.find((item) => item.id === normalizedThreadId) || null;
         }
@@ -601,7 +633,7 @@ function AppContent() {
       navigationRef.current.navigate("DmChat", { thread });
       return true;
     },
-    [api, dmThreads, setDmThreads],
+    [dmThreads, refreshDmThreads],
   );
 
   const openServerChannelTarget = useCallback(
@@ -650,10 +682,9 @@ function AppContent() {
       const joined = await api.joinPrivateCall(call.callId);
       if (
         !joined.success ||
-        !joined.membershipToken ||
-        !joined.nodeBaseUrl ||
         !joined.guildId ||
-        !joined.channelId
+        !joined.channelId ||
+        (!joined.mediaToken && !joined.membershipToken)
       ) {
         return false;
       }
@@ -662,8 +693,11 @@ function AppContent() {
         mode: "private",
         callId: call.callId,
         participantName: call.callerName,
-        membershipToken: joined.membershipToken,
-        nodeBaseUrl: joined.nodeBaseUrl,
+        mediaToken: joined.mediaToken ?? null,
+        mediaWsUrl: joined.mediaWsUrl ?? null,
+        membershipToken: joined.membershipToken ?? null,
+        nodeBaseUrl: joined.nodeBaseUrl ?? null,
+        roomId: joined.roomId ?? null,
         guild: {
           id: joined.guildId,
           name: "Private Calls",
@@ -739,6 +773,25 @@ function AppContent() {
     });
   }, [tokens?.accessToken, selfStatus, selfCustomStatus]);
 
+  const refreshRealtimeState = useCallback(
+    async (options?: { forceDmThreads?: boolean }) => {
+      if (!tokens?.accessToken) return;
+      if (foregroundSyncRef.current) return foregroundSyncRef.current;
+
+      const task = Promise.allSettled([
+        refreshServers(),
+        refreshMyProfile(),
+        refreshDmThreads({ force: options?.forceDmThreads }),
+      ]).then(() => undefined);
+
+      foregroundSyncRef.current = task.finally(() => {
+        foregroundSyncRef.current = null;
+      });
+      return foregroundSyncRef.current;
+    },
+    [tokens?.accessToken, refreshDmThreads, refreshMyProfile, refreshServers],
+  );
+
   // ── Core gateway ─────────────────────────────────────────────────────────────
   // Handles real-time DMs, presence, and call events globally.
   const coreGateway = useCoreGateway({
@@ -778,10 +831,7 @@ function AppContent() {
             // If thread unknown, refresh thread list
             setDmThreads((prev) => {
               if (!prev.some((t) => t.id === event.threadId)) {
-                api
-                  .getDms()
-                  .then((data) => setDmThreads(data.dms ?? []))
-                  .catch(() => {});
+                void refreshDmThreads();
               }
               return prev;
             });
@@ -810,10 +860,7 @@ function AppContent() {
             break;
 
           case "FRIEND_ACCEPTED":
-            api
-              .getDms()
-              .then((data) => setDmThreads(data.dms ?? []))
-              .catch(() => {});
+            void refreshDmThreads({ force: true });
             break;
 
           default:
@@ -821,9 +868,9 @@ function AppContent() {
         }
       },
       [
-        api,
         me?.id,
         queueIncomingCall,
+        refreshDmThreads,
         removeDmMessage,
         sendSelfPresence,
         setDmThreads,
@@ -863,6 +910,7 @@ function AppContent() {
         setMe({ id: login.user.id, username: login.user.username });
         setAuthStatus("");
         await refreshServers();
+        refreshDmThreads({ force: true }).catch(() => {});
         // Load full profile after sign in
         refreshMyProfile().catch(() => {});
       } catch (error: unknown) {
@@ -890,7 +938,15 @@ function AppContent() {
         setAuthStatus(code);
       }
     },
-    [api, getApiErrorCode, setTokens, setMe, refreshServers, refreshMyProfile],
+    [
+      api,
+      getApiErrorCode,
+      setTokens,
+      setMe,
+      refreshDmThreads,
+      refreshServers,
+      refreshMyProfile,
+    ],
   );
 
   const handleForgotPassword = useCallback(
@@ -955,6 +1011,15 @@ function AppContent() {
         } catch {
           setAuthStatus("Failed to join via invite link.");
         }
+        return;
+      }
+
+      if (target.kind === "gift") {
+        navigationRef.current.navigate("Settings", {
+          tab: "billing",
+          giftCode: target.code,
+        });
+        pendingDeepLinkRef.current = null;
         return;
       }
 
@@ -1031,6 +1096,7 @@ function AppContent() {
         try {
           await setTokens(stored);
           await refreshServers();
+          refreshDmThreads({ force: true }).catch(() => {});
           // Load full profile in the background
           refreshMyProfile().catch(() => {});
         } catch {
@@ -1083,7 +1149,7 @@ function AppContent() {
     // Notification received while foregrounded → refresh servers
     const notifReceiveSub = Notifications.addNotificationReceivedListener(
       () => {
-        void refreshServers();
+        void refreshRealtimeState({ forceDmThreads: true });
       },
     );
 
@@ -1096,10 +1162,39 @@ function AppContent() {
   }, [
     handleIncomingUrl,
     handleNotificationCallData,
-    refreshServers,
+    refreshDmThreads,
     refreshMyProfile,
+    refreshRealtimeState,
+    refreshServers,
     setTokens,
   ]);
+
+  useEffect(() => {
+    if (!tokens?.accessToken) return;
+
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const previousState = appStateRef.current;
+      appStateRef.current = nextState;
+
+      if (nextState === "active") {
+        const backgroundDuration = lastBackgroundedAtRef.current
+          ? Date.now() - lastBackgroundedAtRef.current
+          : 0;
+        lastBackgroundedAtRef.current = null;
+        void refreshRealtimeState({ forceDmThreads: backgroundDuration > 15_000 });
+        sendSelfPresence();
+        return;
+      }
+
+      if (previousState === "active") {
+        lastBackgroundedAtRef.current = Date.now();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [tokens?.accessToken, refreshRealtimeState, sendSelfPresence]);
 
   // ── Pending deep link after sign in ───────────────────────────────────────────
 
@@ -1330,9 +1425,11 @@ const styles = StyleSheet.create({
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AuthProvider>
-        <AppContent />
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </ThemeProvider>
     </SafeAreaProvider>
   );
 }

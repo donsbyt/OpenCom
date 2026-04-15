@@ -7,6 +7,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },
+  "dependencies": {
+    "jose": "^5.9.3"
+  },
   "devDependencies": {
     "typescript": "^5.5.4"
   },
@@ -22,6 +25,10 @@
     "./ids.js": {
       "types": "./src/ids.ts",
       "default": "./src/ids.ts"
+    },
+    "./mediaToken.js": {
+      "types": "./src/mediaToken.ts",
+      "default": "./src/mediaToken.ts"
     }
   }
 }

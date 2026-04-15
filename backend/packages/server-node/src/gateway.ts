@@ -21,6 +21,7 @@ import {
   closePeer,
   getMediasoupDiagnostics,
 } from "./voice/mediasoup.js";
+import { buildVoiceIceServers } from "./voice/iceServers.js";
 import { createLogger, sanitizeErrorMessage } from "./logger.js";
 import { resolveCoreUserProfiles } from "./userDirectory.js";
 
@@ -438,7 +439,16 @@ export function attachNodeGateway(app: FastifyInstance) {
           const rtpCapabilities = await getRouterRtpCapabilities(guildId, channelId);
           const producers = listProducers(guildId, channelId).filter((p) => p.userId !== conn?.userId);
 
-          sendDispatch(conn, "VOICE_JOINED", { guildId, channelId, rtpCapabilities, producers, requestId });
+          const iceServers = buildVoiceIceServers(conn.userId);
+
+          sendDispatch(conn, "VOICE_JOINED", {
+            guildId,
+            channelId,
+            rtpCapabilities,
+            producers,
+            iceServers,
+            requestId,
+          });
           await emitVoiceState(guildId, conn.userId);
         } catch (error) {
           sendVoiceError(conn, "VOICE_JOIN_FAILED", error, { guildId, channelId, requestId });

@@ -83,7 +83,8 @@ function deobfuscateSession(raw) {
   const key = getSessionKey();
   const out = Buffer.allocUnsafe(input.length);
   for (let i = 0; i < input.length; i += 1) out[i] = input[i] ^ key[i % key.length];
-  return JSON.parse(out.toString("utf8"));
+  const parsed = JSON.parse(out.toString("utf8"));
+  return parsed && typeof parsed === "object" ? parsed : {};
 }
 
 function readDesktopSession() {
@@ -104,7 +105,9 @@ function writeDesktopSession(session) {
     const filePath = getSessionFilePath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const encoded = obfuscateSession(session || {});
-    fs.writeFileSync(filePath, encoded, "utf8");
+    const tempPath = `${filePath}.tmp`;
+    fs.writeFileSync(tempPath, encoded, "utf8");
+    fs.renameSync(tempPath, filePath);
     return true;
   } catch (error) {
     log.error("Failed writing desktop session", error);
@@ -161,7 +164,7 @@ function resolveUpdateCheckUrl() {
 }
 
 function isInstallableArtifact(fileName = "") {
-  return /\.(exe|deb)$/i.test(String(fileName || "").trim());
+  return /\.(exe|deb|rpm)$/i.test(String(fileName || "").trim());
 }
 
 function appendVersionToFileName(fileName = "", version = "") {
@@ -176,17 +179,44 @@ async function downloadUpdateArtifact(url, destinationPath, expectedSha256 = "")
   if (!response.ok) {
     throw new Error(`UPDATE_DOWNLOAD_${response.status}`);
   }
-
-  const payload = Buffer.from(await response.arrayBuffer());
-  if (expectedSha256) {
-    const digest = crypto.createHash("sha256").update(payload).digest("hex");
-    if (digest.toLowerCase() !== String(expectedSha256).trim().toLowerCase()) {
-      throw new Error("UPDATE_CHECKSUM_MISMATCH");
-    }
+  if (!response.body) {
+    throw new Error("UPDATE_DOWNLOAD_EMPTY");
   }
 
   fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-  fs.writeFileSync(destinationPath, payload);
+  const tempPath = `${destinationPath}.part`;
+  const out = fs.createWriteStream(tempPath);
+  const hash = expectedSha256 ? crypto.createHash("sha256") : null;
+
+  try {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      if (hash) hash.update(chunk);
+      await new Promise((resolve, reject) => {
+        out.write(chunk, (error) => (error ? reject(error) : resolve()));
+      });
+    }
+    await new Promise((resolve, reject) => {
+      out.end((error) => (error ? reject(error) : resolve()));
+    });
+    if (hash) {
+      const digest = hash.digest("hex");
+      if (digest.toLowerCase() !== String(expectedSha256).trim().toLowerCase()) {
+        throw new Error("UPDATE_CHECKSUM_MISMATCH");
+      }
+    }
+    fs.renameSync(tempPath, destinationPath);
+  } catch (error) {
+    out.destroy();
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {}
+    throw error;
+  }
+
   return destinationPath;
 }
 

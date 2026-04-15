@@ -1,53 +1,83 @@
-import fs from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { promises as fs } from "node:fs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const clientDir = path.resolve(__dirname, "..");
-const minimatchDir = path.join(clientDir, "vendor", "minimatch");
-const nodeModulesDir = path.join(minimatchDir, "node_modules");
+const root = process.cwd();
+const vendorRoot = path.join(root, "vendor", "minimatch");
+const vendorNodeModules = path.join(vendorRoot, "node_modules");
 
-const sources = [
-  {
-    name: "balanced-match",
-    from: path.join(minimatchDir, "deps-balanced-match")
-  },
-  {
-    name: "brace-expansion",
-    from: path.join(minimatchDir, "deps-brace-expansion")
-  }
-];
+const MINIMATCH_VERSION = "10.2.1";
 
-async function pathExists(target) {
-  try {
-    await fs.access(target);
-    return true;
-  } catch {
-    return false;
+function run(cmd, args, cwd) {
+  const res = spawnSync(cmd, args, {
+    cwd,
+    stdio: "inherit",
+    encoding: "utf8",
+  });
+  if (res.status !== 0) {
+    throw new Error(
+      `${cmd} ${args.join(" ")} failed with exit code ${res.status ?? "unknown"}`,
+    );
   }
 }
 
-async function ensurePackage({ name, from }) {
-  const to = path.join(nodeModulesDir, name);
-  const exists = await pathExists(from);
-  if (!exists) {
-    throw new Error(`Missing vendored source '${from}'`);
-  }
+async function packAndExtract(spec, dest) {
+  const work = await fs.mkdtemp(path.join(tmpdir(), "opencom-pack-"));
+  try {
+    run("npm", ["pack", spec, "--silent"], work);
+    const files = await fs.readdir(work);
+    const tgz = files.find((f) => f.endsWith(".tgz"));
+    if (!tgz) throw new Error(`No tarball produced for ${spec}`);
+    run("tar", ["-xzf", tgz], work);
 
-  await fs.rm(to, { recursive: true, force: true });
-  await fs.cp(from, to, { recursive: true });
+    await fs.rm(dest, { recursive: true, force: true });
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.cp(path.join(work, "package"), dest, {
+      recursive: true,
+      force: true,
+      verbatimSymlinks: false,
+    });
+  } finally {
+    await fs.rm(work, { recursive: true, force: true });
+  }
 }
 
 async function main() {
-  await fs.mkdir(nodeModulesDir, { recursive: true });
-  for (const source of sources) {
-    await ensurePackage(source);
-  }
-  console.log("Ensured vendored minimatch dependencies");
+  await fs.rm(vendorRoot, { recursive: true, force: true });
+  await fs.mkdir(vendorNodeModules, { recursive: true });
+
+  // ✅ USE SAFE VERSION
+  await packAndExtract(`minimatch@${MINIMATCH_VERSION}`, vendorRoot);
+  await packAndExtract(
+    "brace-expansion@2.0.1",
+    path.join(vendorNodeModules, "brace-expansion"),
+  );
+  await packAndExtract(
+    "balanced-match@1.0.2",
+    path.join(vendorNodeModules, "balanced-match"),
+  );
+
+  // ✅ Ensure entry point
+  await fs.writeFile(
+    path.join(vendorRoot, "index.js"),
+    "module.exports = require('./dist/commonjs/index.js')\n",
+  );
+
+  // ✅ CRITICAL: PRESERVE + FORCE VERSION
+  const pkgPath = path.join(vendorRoot, "package.json");
+  const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
+
+  pkg.version = MINIMATCH_VERSION;
+  pkg.main = "index.js";
+  pkg.type = "commonjs";
+
+  await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+
+  console.log(`Ensured vendored minimatch ${MINIMATCH_VERSION}`);
 }
 
-main().catch((error) => {
-  console.error(error?.message || error);
+main().catch((err) => {
+  console.error(err?.message || err);
   process.exit(1);
 });
